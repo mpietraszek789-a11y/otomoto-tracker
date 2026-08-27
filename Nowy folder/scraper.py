@@ -50,7 +50,7 @@ def scrape_and_update(brand, model, year_from, year_to):
     model_clean = model.strip().lower().replace(" ", "-")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Connection': 'keep-alive'
@@ -59,19 +59,24 @@ def scrape_and_update(brand, model, year_from, year_to):
     now_time = datetime.now()
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # SPrytny trik: przechodzimy dwa razy – raz z sortowaniem rosnącym po cenie, raz malejącym.
-    # To zmusza Otomoto do wydania zupełnie innych paczek aut i omija limit 32 ofert.
-    sort_orders = ['sort_by=price:asc', 'sort_by=price:desc', 'sort_by=created_at:desc']
+    # SPOSÓB NA BLOKADĘ: Dzielimy automatycznie zakres cen na mniejsze przedziały (widełki co 15 tys. PLN),
+    # żeby Otomoto za każdym razem zwracało mniejszą paczkę aut, którą w pełni nam wyda.
+    price_ranges = [
+        (0, 35000),
+        (35001, 50000),
+        (50001, 65000),
+        (65001, 85000),
+        (85001, 120000),
+        (120001, 500000)
+    ]
     
-    for sort_param in sort_orders:
-        page = 1
-        max_pages = 10 # Po 10 stron dla każdego sortowania to aż nadto, żeby zebrać komplet
-        
-        while page <= max_pages:
-            url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}/{str(page)}?{sort_param}&search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
+    for p_min, p_max in price_ranges:
+        # Przechodzimy po kilku stronach dla każdego przedziału cenowego
+        for page in range(1, 6):
+            url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}/{str(page)}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
             
             try:
-                time.sleep(random.uniform(0.8, 1.5))
+                time.sleep(random.uniform(0.7, 1.3))
                 response = requests.get(url, headers=headers, timeout=10)
                 if response.status_code != 200:
                     break
@@ -159,9 +164,9 @@ def scrape_and_update(brand, model, year_from, year_to):
                 except Exception:
                     continue
             
+            # Jeśli w tych widełkach cenowych na danej stronie nie było nic nowego, idziemy do kolejnych widełek cenowych
             if page_found == 0:
                 break
-            page += 1
 
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
@@ -181,4 +186,4 @@ def scrape_and_update(brand, model, year_from, year_to):
 
     conn.commit()
     conn.close()
-    return f"Sukces! Pobrano pełny rynek. Liczba aktywnych ofert w bazie: {total_active}."
+    return f"Sukces! Pobrano pełny rynek metodą widełkową. Liczba aktywnych ofert w bazie: {total_active}."
