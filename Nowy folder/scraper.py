@@ -1,11 +1,10 @@
 import sqlite3
+import requests
+from bs4 import BeautifulSoup
 import re
 import time
 import random
 from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 
 def get_connection():
     return sqlite3.connect('otomoto.db')
@@ -50,48 +49,36 @@ def scrape_and_update(brand, model, year_from, year_to):
     brand_clean = brand.strip().lower()
     model_clean = model.strip().lower().replace(" ", "-")
     
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    }
+    
     now_time = datetime.now()
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Konfiguracja prawdziwej przeglądarki (działa w tle)
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")  # Niewidoczne okno
-    chrome_options.add_argument("--no-sandbox")  # DODAJ TO
-    chrome_options.add_argument("--disable-dev-shm-usage")  # DODAJ TO
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-    
-    # Uruchamiamy przeglądarkę
-    try:
-        driver = webdriver.Chrome(options=chrome_options)
-    except Exception as e:
-        return "Błąd: Brak zainstalowanej przeglądarki Chrome lub sterownika."
-
     page = 1
-    max_pages = 25
+    max_pages = 20 # Wystarczy na ok. 600 aut, co przy wąskich rocznikach jest sporym zapasem
     
     while page <= max_pages:
-        url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}/{str(page)}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
+        # TUTAJ BYŁ BŁĄD! Teraz poprawnie dodajemy parametr &page=X na końcu linku:
+        url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
         
         try:
-            driver.get(url)
-            # Czekamy jak prawdziwy człowiek
-            time.sleep(random.uniform(2.5, 4.0))
+            # Krótka pauza, żeby nie zalać serwera zapytaniami
+            time.sleep(random.uniform(0.5, 1.0))
             
-            # Przewijamy stronę w dół, żeby uaktywnić doczytywanie (Lazy Loading)
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-            time.sleep(random.uniform(1.0, 1.5))
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(random.uniform(1.0, 2.0))
-            
-            html = driver.page_source
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                break
         except Exception:
             break
             
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
         articles = soup.find_all('article')
         
+        # Jeśli strona jest pusta, kończymy pętlę
         if not articles:
             break 
 
@@ -170,12 +157,12 @@ def scrape_and_update(brand, model, year_from, year_to):
             except Exception:
                 continue
         
+        # Ostatnia strona = koniec
         if page_found == 0:
             break
         page += 1
 
-    driver.quit()
-
+    # Aktualizacja aut sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -186,6 +173,7 @@ def scrape_and_update(brand, model, year_from, year_to):
           AND last_seen_at < ?
     ''', (brand_clean, model_clean, year_from, year_to, limit_time))
 
+    # Pobieranie aktualnego wyniku z bazy
     cursor.execute('''
         SELECT COUNT(*) FROM offers 
         WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
@@ -194,4 +182,4 @@ def scrape_and_update(brand, model, year_from, year_to):
 
     conn.commit()
     conn.close()
-    return f"Sukces (SELENIUM)! Pobrano absolutnie wszystkie oferty. Liczba aktywnych: {total_active}."
+    return f"Sukces! Skrypt przeszedł {page-1} stron z ofertami. Znaleziono aktualnie aktywnych: {total_active}."
