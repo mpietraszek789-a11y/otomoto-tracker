@@ -2,6 +2,8 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 import re
+import time
+import random
 from datetime import datetime, timedelta
 
 def get_connection():
@@ -47,15 +49,17 @@ def scrape_and_update(brand, model, year_from, year_to):
     brand_clean = brand.strip().lower()
     model_clean = model.strip().lower().replace(" ", "-")
     
+    # Lepsze nagłówki udające prawdziwą przeglądarkę użytkownika
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Connection': 'keep-alive'
     }
     
-    found_count = 0
     now_time = datetime.now()
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Zwiększamy limit do 30 stron, żeby przejrzeć jak najwięcej z ponad 600 ofert
     page = 1
     max_pages = 30
     
@@ -63,6 +67,9 @@ def scrape_and_update(brand, model, year_from, year_to):
         url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}/{str(page)}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
         
         try:
+            # Krótka pauza (od 1 do 2 sekund), żeby Otomoto nie uznało nas za robota atakującego serwer
+            time.sleep(random.uniform(1.0, 2.0))
+            
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code != 200:
                 break
@@ -123,7 +130,6 @@ def scrape_and_update(brand, model, year_from, year_to):
                     pub_date = date_match.group(0)
 
                 if price > 0:
-                    found_count += 1
                     page_found += 1
                     
                     cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (otomoto_id,))
@@ -151,6 +157,7 @@ def scrape_and_update(brand, model, year_from, year_to):
             except Exception:
                 continue
         
+        # Jeśli na stronie nie było nowych unikalnych ofert lub strona jest pusta, kończymy
         if page_found == 0:
             break
         page += 1
@@ -165,6 +172,12 @@ def scrape_and_update(brand, model, year_from, year_to):
           AND last_seen_at < ?
     ''', (brand_clean, model_clean, year_from, year_to, limit_time))
 
+    cursor.execute('''
+        SELECT COUNT(*) FROM offers 
+        WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
+    ''', (brand_clean, model_clean, year_from, year_to))
+    total_active = cursor.fetchone()[0]
+
     conn.commit()
     conn.close()
-    return f"Sukces! Przeszukano do {page-1} stron Otomoto. Zaktualizowano/znaleziono ofert: {found_count}."
+    return f"Sukces! Przeszukano {page-1} stron. Liczba aktywnych ofert w bazie: {total_active}."
