@@ -5,6 +5,7 @@ import re
 import time
 import random
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 def get_connection():
     return sqlite3.connect('otomoto.db')
@@ -55,18 +56,17 @@ def scrape_and_update(brand, model, year_from, year_to):
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     }
     
-    now_time = datetime.now()
+    # NAPRAWA CZASU: Wymuszamy czas polski niezależnie od tego, gdzie stoi serwer!
+    now_time = datetime.now(ZoneInfo("Europe/Warsaw"))
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
     page = 1
-    max_pages = 20 # Wystarczy na ok. 600 aut, co przy wąskich rocznikach jest sporym zapasem
+    max_pages = 20 
     
     while page <= max_pages:
-        # TUTAJ BYŁ BŁĄD! Teraz poprawnie dodajemy parametr &page=X na końcu linku:
         url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
         
         try:
-            # Krótka pauza, żeby nie zalać serwera zapytaniami
             time.sleep(random.uniform(0.5, 1.0))
             
             response = requests.get(url, headers=headers, timeout=10)
@@ -78,7 +78,6 @@ def scrape_and_update(brand, model, year_from, year_to):
         soup = BeautifulSoup(response.text, 'html.parser')
         articles = soup.find_all('article')
         
-        # Jeśli strona jest pusta, kończymy pętlę
         if not articles:
             break 
 
@@ -124,10 +123,11 @@ def scrape_and_update(brand, model, year_from, year_to):
                 link_elem = art.find('a', href=True)
                 offer_url = link_elem['href'] if link_elem else ""
 
+                # NAPRAWA DATY: Rozpoznawanie "Dzisiaj", "Wczoraj" lub pełnej polskiej daty (np. 15 sierpnia 2026)
                 pub_date = "Brak danych"
-                date_match = re.search(r'(?:Dodano|Wystawiono|dzisiaj|wczoraj|\d{2}\.\d{2}\.\d{4})', raw_text, re.IGNORECASE)
+                date_match = re.search(r'(Dzisiaj|Wczoraj|\d{1,2}\s(?:stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s\d{4})', raw_text, re.IGNORECASE)
                 if date_match:
-                    pub_date = date_match.group(0)
+                    pub_date = date_match.group(1).capitalize()
 
                 if price > 0:
                     page_found += 1
@@ -157,12 +157,10 @@ def scrape_and_update(brand, model, year_from, year_to):
             except Exception:
                 continue
         
-        # Ostatnia strona = koniec
         if page_found == 0:
             break
         page += 1
 
-    # Aktualizacja aut sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -173,7 +171,6 @@ def scrape_and_update(brand, model, year_from, year_to):
           AND last_seen_at < ?
     ''', (brand_clean, model_clean, year_from, year_to, limit_time))
 
-    # Pobieranie aktualnego wyniku z bazy
     cursor.execute('''
         SELECT COUNT(*) FROM offers 
         WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
@@ -182,4 +179,4 @@ def scrape_and_update(brand, model, year_from, year_to):
 
     conn.commit()
     conn.close()
-    return f"Sukces! Skrypt przeszedł {page-1} stron z ofertami. Znaleziono aktualnie aktywnych: {total_active}."
+    return f"Sukces! Skrypt przeszedł {page-1} stron. Aktualnie w bazie: {total_active}."
