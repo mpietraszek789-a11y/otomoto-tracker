@@ -55,9 +55,9 @@ def scrape_and_update(brand, model, year_from, year_to):
     now_time = datetime.now()
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # PĘTLA STRONNICOWANIA (Pobieramy do 10 stron, żeby złapać wszystkie oferty np. 130+)
+    # Zwiększamy limit do 30 stron, żeby przejrzeć jak najwięcej z ponad 600 ofert
     page = 1
-    max_pages = 10
+    max_pages = 30
     
     while page <= max_pages:
         url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}/{str(page)}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
@@ -73,7 +73,7 @@ def scrape_and_update(brand, model, year_from, year_to):
         articles = soup.find_all('article')
         
         if not articles:
-            break # Jeśli na kolejnej stronie nie ma ofert, kończymy pętlę
+            break 
 
         page_found = 0
         for art in articles:
@@ -117,7 +117,6 @@ def scrape_and_update(brand, model, year_from, year_to):
                 link_elem = art.find('a', href=True)
                 offer_url = link_elem['href'] if link_elem else ""
 
-                # DATA PUBLIKACJI / CZAS DODANIA (szukamy wzmianek typu "Dzisiaj", "Wczoraj" lub pełnej daty w karcie)
                 pub_date = "Brak danych"
                 date_match = re.search(r'(?:Dodano|Wystawiono|dzisiaj|wczoraj|\d{2}\.\d{2}\.\d{4})', raw_text, re.IGNORECASE)
                 if date_match:
@@ -152,12 +151,10 @@ def scrape_and_update(brand, model, year_from, year_to):
             except Exception:
                 continue
         
-        # Jeśli na danej stronie nie znaleźliśmy nic pasującego, przerywamy paginację
         if page_found == 0:
             break
         page += 1
 
-    # Oznaczanie jako Sprzedane ofert, których nie było przez ostatnie 3 dni
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -170,4 +167,4 @@ def scrape_and_update(brand, model, year_from, year_to):
 
     conn.commit()
     conn.close()
-    return f"Sukces! Przeszukano strony Otomoto. Łącznie znaleziono/zaktualizowano: {found_count} ofert."
+    return f"Sukces! Przeszukano do {page-1} stron Otomoto. Zaktualizowano/znaleziono ofert: {found_count}."
