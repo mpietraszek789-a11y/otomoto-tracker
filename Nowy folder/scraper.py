@@ -60,7 +60,7 @@ def extract_and_save_offer(art, cursor, now_time_str, brand, model, year_from, y
         prices = [float(p[0].replace(' ', '')) for p in price_matches]
         valid_prices = [p for p in prices if 3000 < p < 5000000]
         if valid_prices:
-            price = max(valid_prices)
+            price = max(valid_prices) # Omijanie leasingu
 
     year = year_from
     if enforce_filters:
@@ -131,8 +131,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'pl-PL,pl;q=0.9',
     })
     
     now_time = datetime.now(ZoneInfo("Europe/Warsaw"))
@@ -142,21 +141,32 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     model_clean = model.strip()
     model_parts = [re.sub(r'[^a-z0-9]', '', m) for m in model_clean.lower().split()]
     
+    category_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
+    b_slug = brand_clean.lower().replace(" ", "-")
+    m_slug = model_clean.lower().replace(" ", "-")
+
+    # 1. KROK: Sprawdzamy oficjalną liczbę aut bezpośrednio ze strony Otomoto (dla weryfikacji)
+    otomoto_total_expected = 0
+    test_url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
+    try:
+        resp = session.get(test_url, timeout=10)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # Szukamy tekstu typu "98 ogłoszeń"
+            match = re.search(r'(\d[\d\s]*)\s*ogłosze[ńn]', soup.text, re.IGNORECASE)
+            if match:
+                otomoto_total_expected = int(match.group(1).replace(' ', ''))
+    except Exception:
+        pass
+
     total_found = 0
 
     if custom_url and "otomoto.pl" in custom_url:
+        # Obsługa opcjonalnego linku ręcznego
         page = 1
         previous_ids = set()
-        
         while page <= 25:
-            if '?' in custom_url:
-                if 'page=' in custom_url:
-                    url = re.sub(r'page=\d+', f'page={page}', custom_url)
-                else:
-                    url = f"{custom_url}&page={page}"
-            else:
-                url = f"{custom_url}?page={page}"
-                
+            url = f"{custom_url}&page={page}" if '?' in custom_url else f"{custom_url}?page={page}"
             try:
                 time.sleep(random.uniform(0.5, 1.0))
                 resp = session.get(url, timeout=10)
@@ -172,8 +182,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             for art in articles:
                 oid = art.get('id') or art.get('data-id')
                 if oid: current_ids.add(oid)
-                
-                # Złoty środek: W trybie linku wyłączamy restrykcyjne filtry, ufając temu, co wkleił użytkownik
                 if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts, enforce_filters=False):
                     total_found += 1
             
@@ -181,57 +189,35 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             if page > 1 and overlap >= 20: break
             previous_ids = current_ids
             page += 1
-
     else:
-        # Standardowy system Mikro-Koszyków (Omija system anty-botowy blokujący paginację)
-        category_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
-        b_slug = brand_clean.lower().replace(" ", "-")
-        m_slug = model_clean.lower().replace(" ", "-")
-        
-        # Koszyki co 20 tys. PLN dbają o to, żeby na każdym przedziale była z reguły tylko jedna strona.
-        price_brackets = [(i, i + 19999) for i in range(0, 300000, 20000)]
-        price_brackets.extend([(300000, 499999), (500000, 5000000)])
+        # 2. KROK: Zautomatyzowane Mikrokoszyki (Hardcodowane URL-e zapobiegające błędom biblioteki)
+        # 16 gęstych koszyków cenowych. Każdy zmieści < 30 aut, więc NIGDY nie musimy wejść na stronę nr 2!
+        price_brackets = [
+            (0, 60000), (60001, 80000), (80001, 100000), (100001, 120000),
+            (120001, 140000), (140001, 160000), (160001, 180000), (180001, 200000),
+            (200001, 230000), (230001, 270000), (270001, 310000), (310001, 350000),
+            (350001, 400000), (400001, 500000), (500001, 5000000)
+        ]
         
         for p_min, p_max in price_brackets:
-            page = 1
-            previous_ids = set()
+            # RĘCZNIE wklejony URL z dokładnie takimi znakami, jakich żąda serwer Otomoto. Brak ucinania filtrów!
+            url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
             
-            while page <= 3:
-                url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}/od-{year_from}"
-                params = {
-                    "search[filter_float_year:to]": year_to,
-                    "search[filter_float_price:from]": p_min,
-                    "search[filter_float_price:to]": p_max,
-                    "page": page
-                }
-                try:
-                    time.sleep(random.uniform(0.4, 0.8))
-                    resp = session.get(url, params=params, timeout=10)
-                    if resp.status_code != 200: break
-                except:
-                    break
-                    
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                articles = soup.find_all('article')
-                if not articles: break 
-
-                current_ids = set()
-                for art in articles:
-                    oid = art.get('id') or art.get('data-id')
-                    if oid: current_ids.add(oid)
-                    
-                    if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts, enforce_filters=True):
-                        total_found += 1
+            try:
+                time.sleep(random.uniform(0.5, 0.9)) # Przerwa, żeby udawać człowieka
+                resp = session.get(url, timeout=10)
+                if resp.status_code != 200: continue
+            except:
+                continue
                 
-                # Jeśli stron zwróciła mniej niż 28 elementów, to z całą pewnością jest to ostatnia strona
-                if len(articles) < 28:
-                    break
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            articles = soup.find_all('article')
+            
+            for art in articles:
+                if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts, enforce_filters=True):
+                    total_found += 1
 
-                overlap = len(current_ids.intersection(previous_ids))
-                if page > 1 and overlap >= 20: break
-                previous_ids = current_ids
-                page += 1
-
+    # Oznaczanie sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -240,15 +226,16 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
           AND production_year BETWEEN ? AND ? AND last_seen_at < ?
     ''', (brand_clean, model_clean, year_from, year_to, limit_time))
 
-    cursor.execute('''
-        SELECT COUNT(*) FROM offers 
-        WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) 
-          AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
-    ''', (brand_clean, model_clean, year_from, year_to))
-    
-    total_active = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     
-    mode = "Z Linku" if custom_url else "Baza"
-    return f"Sukces ({mode}). Przeanalizowano aut: {total_found}. Łącznie aktywnych ofert w bazie: {total_active}."
+    # Tworzenie raportu 
+    if not custom_url:
+        if otomoto_total_expected == 0:
+            return f"Sukces! Skrypt zapisał: {total_found} ofert dla tych kryteriów."
+        elif total_found >= (otomoto_total_expected - 5): # Drobny margines na auta zepsute/usunięte w trakcie
+            return f"✅ Idealnie! Otomoto pokazuje {otomoto_total_expected} ofert, a skrypt zapisał {total_found}."
+        else:
+            return f"⚠️ Pomyślnie zapisano {total_found} ofert, jednak Otomoto twierdzi, że ma ich {otomoto_total_expected}."
+    else:
+        return f"Sukces (Z gotowego linku). Przeanalizowano i zapisano: {total_found} ofert."
