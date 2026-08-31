@@ -9,20 +9,26 @@ try:
 except Exception:
     pass
 
-st.title("🚗 Otomoto Tracker - Podgląd Ofert")
+st.title("🏍️🚗 Otomoto Tracker - Podgląd Ofert")
 
 # Panel boczny
 st.sidebar.header("Kryteria Wyszukiwania")
-brand = st.sidebar.text_input("Marka", "Toyota")
-model = st.sidebar.text_input("Model", "Yaris")
+category = st.sidebar.radio("Kategoria", ["Motocykle", "Osobowe"])
+
+# Zmiana domyślnych wartości w zależności od wybranej kategorii
+default_brand = "Yamaha" if category == "Motocykle" else "Toyota"
+default_model = "MT-07" if category == "Motocykle" else "Yaris"
+
+brand = st.sidebar.text_input("Marka", default_brand)
+model = st.sidebar.text_input("Model", default_model)
 
 col1, col2 = st.sidebar.columns(2)
 year_from = col1.number_input("Rocznik Od", 1990, 2026, 2018)
 year_to = col2.number_input("Rocznik Do", 1990, 2026, 2023)
 
 if st.sidebar.button("Pobierz / Odśwież dane z Otomoto", type="primary"):
-    with st.spinner("Pobieram WSZYSTKIE strony z Otomoto (to może chwilę potrwać)..."):
-        msg = scrape_and_update(brand, model, year_from, year_to)
+    with st.spinner(f"Pobieram oferty z kategorii: {category}..."):
+        msg = scrape_and_update(category, brand, model, year_from, year_to)
         st.sidebar.success(msg)
 
 # Odczyt danych z bazy
@@ -70,12 +76,11 @@ except Exception as e:
     df = pd.DataFrame()
 
 if df.empty:
-    st.info("Brak danych w bazie. Kliknij przycisk po lewej stronie, aby pobrać najświeższe oferty!")
+    st.info("Brak danych w bazie. Upewnij się, że kategoria, marka i model są poprawne, a następnie kliknij pobieranie!")
 else:
     years = sorted(df['Rocznik'].unique(), reverse=True)
     tabs = st.tabs([f"Rocznik {y}" for y in years] + ["🕒 Historia Ofert (Filtry i Sortowanie)"])
 
-    # 1. ZAKŁADKI ROCZNIKÓW (Tylko aktywne, z ID i datą publikacji)
     for idx, year in enumerate(years):
         with tabs[idx]:
             active_year_raw = df[(df['Rocznik'] == year) & (df['Status'] == 'Aktywne')]
@@ -85,7 +90,7 @@ else:
 
             m1, m2 = st.columns(2)
             m1.metric("💰 Średnia Cena", f"{avg_price:,.0f} PLN".replace(",", " "))
-            m2.metric("🚘 Średni Przebieg", f"{avg_mileage:,.0f} km".replace(",", " "))
+            m2.metric("🛣️ Średni Przebieg", f"{avg_mileage:,.0f} km".replace(",", " "))
             
             st.divider()
             
@@ -100,11 +105,9 @@ else:
                 
                 st.table(disp_df)
 
-    # 2. ZAKŁADKA: HISTORIA OFERT Z INTERAKTYWNYM SORTOWANIEM I FILTROWANIEM
     with tabs[-1]:
         st.subheader("Wszystkie oferty – Filtrowanie i Sortowanie")
         
-        # Interaktywne filtry w Streamlit
         col_f1, col_f2 = st.columns(2)
         status_filter = col_f1.multiselect("Filtruj po statusie:", options=['Aktywne', 'Zmieniono cenę', 'Sprzedane'], default=['Aktywne', 'Zmieniono cenę', 'Sprzedane'])
         search_query = col_f2.text_input("Szukaj w tytule oferty:", "")
@@ -116,7 +119,6 @@ else:
         hist_disp = filtered_df[['otomoto_id', 'Rocznik', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Dynamic_Status', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
         hist_disp.rename(columns={'otomoto_id': 'ID Oferty', 'Dynamic_Status': 'Status'}, inplace=True)
         
-        # Konwersja do ładnego formatu tekstowego dla podglądu statycznego
         hist_disp['Cena (PLN)'] = hist_disp['Cena (PLN)'].apply(lambda x: f"{int(x):,} PLN".replace(",", " ") if x > 0 else "Brak ceny")
         hist_disp['Przebieg (km)'] = hist_disp['Przebieg (km)'].apply(lambda x: f"{int(x):,} km".replace(",", " ") if x > 0 else "Brak danych")
 
@@ -129,6 +131,4 @@ else:
             return [''] * len(row)
 
         styled_hist = hist_disp.style.apply(highlight_all, axis=1)
-        
-        # Używamy st.dataframe zamiast st.table w ostatniej zakładce – daje to wbudowane sortowanie kolumn w nagłówkach!
         st.dataframe(styled_hist, use_container_width=True)
