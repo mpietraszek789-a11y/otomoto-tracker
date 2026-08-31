@@ -9,7 +9,7 @@ try:
 except Exception:
     pass
 
-st.title("🏍️🚗 Otomoto Tracker - Podgląd Ofert")
+st.title(" Otomoto Tracker - Podgląd Ofert")
 
 # Panel boczny
 st.sidebar.header("Kryteria Wyszukiwania")
