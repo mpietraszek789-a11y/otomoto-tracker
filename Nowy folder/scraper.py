@@ -50,7 +50,6 @@ def scrape_and_update(category, brand, model, year_from, year_to):
     brand_clean = brand.strip().lower()
     model_clean = model.strip().lower().replace(" ", "-")
     
-    # Przełącznik kategorii URL (Motocykle vs Osobowe)
     category_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
     
     headers = {
@@ -63,11 +62,10 @@ def scrape_and_update(category, brand, model, year_from, year_to):
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
     page = 1
-    max_pages = 20 
+    max_pages = 25 
     
-    # Przygotowujemy model do twardego sprawdzania (usuwamy spacje i myślniki, zostawiamy same litery/cyfry)
-    # Przykład: "MT-07" zamienia na "mt07", co zapobiega pomyłkom.
-    search_model_norm = re.sub(r'[^a-z0-9]', '', model.lower())
+    # Rozbijamy model na słowa kluczowe (żeby "Klasa C" i "C Klasa" działało tak samo dobrze)
+    model_parts = [re.sub(r'[^a-z0-9]', '', m) for m in model.lower().split()]
     
     while page <= max_pages:
         url = f"https://www.otomoto.pl/{category_slug}/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
@@ -83,10 +81,10 @@ def scrape_and_update(category, brand, model, year_from, year_to):
         soup = BeautifulSoup(response.text, 'html.parser')
         articles = soup.find_all('article')
         
+        # Przerywamy pętlę TYLKO wtedy, gdy Otomoto przestanie wydawać nam artykuły
         if not articles:
             break 
 
-        page_found = 0
         for art in articles:
             try:
                 otomoto_id = art.get('id') or art.get('data-id')
@@ -95,40 +93,45 @@ def scrape_and_update(category, brand, model, year_from, year_to):
 
                 raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
                 
-                title_elem = art.find('h2') or art.find('a')
-                title = title_elem.text.strip() if title_elem else f"{brand} {model}"
+                # TWARDY FILTR: Sprawdzamy czy w tekście pojawia się model, którego szukamy
+                text_norm = re.sub(r'[^a-z0-9]', '', raw_text.lower())
+                # Jeśli jakiejś części nazwy modelu nie ma w ogłoszeniu -> omijamy
+                if not all(part in text_norm for part in model_parts if part):
+                    continue
                 
-                # TWARDY FILTR MODELU: Jeśli szukasz GLA, odrzuca CLA. Jeśli szukasz MT-07, odrzuca inne.
-                title_norm = re.sub(r'[^a-z0-9]', '', title.lower())
-                if search_model_norm not in title_norm:
-                    continue  # Pomijamy to ogłoszenie i idziemy do następnego
+                # ROCZNIK: Wyciągamy wszystkie 4-cyfrowe liczby (żeby ominąć pojemności silnika)
+                year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
+                valid_year = None
+                for ym in year_matches:
+                    ym_int = int(ym)
+                    if int(year_from) <= ym_int <= int(year_to):
+                        valid_year = ym_int
+                        break # Jeśli jakakolwiek liczba pasuje do Twojego filtra lat, to musi być to!
+                        
+                if not valid_year:
+                    continue
+                year = valid_year
+
+                title_elem = art.find('h1') or art.find('h2') or art.find('h6') or art.find('a')
+                title = title_elem.text.strip() if title_elem else f"{brand} {model}"
                 
                 # CENA
                 price = 0.0
-                price_matches = re.findall(r'\b(\d{1,3}(?:\s\d{3})+|\d{3,7})\s*(?:PLN|EUR)', raw_text)
-                prices = [float(p.replace(' ', '')) for p in price_matches]
-                valid_prices = [p for p in prices if 3000 < p < 5000000]
-                if valid_prices:
-                    price = min(valid_prices)
+                price_matches = re.findall(r'(\d{1,3}(?: \d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
+                if price_matches:
+                    prices = [float(p[0].replace(' ', '')) for p in price_matches]
+                    valid_prices = [p for p in prices if 3000 < p < 5000000]
+                    if valid_prices:
+                        price = min(valid_prices)
 
                 # PRZEBIEG
                 mileage = 0
-                mileage_matches = re.findall(r'\b(\d{1,3}(?:\s\d{3})+|\d{1,7})\s*km\b', raw_text)
-                mileages = [int(m.replace(' ', '')) for m in mileage_matches]
-                valid_mileages = [m for m in mileages if m > 0]
-                if valid_mileages:
-                    mileage = max(valid_mileages)
-                elif mileages:
-                    mileage = mileages[0]
-
-                # ROCZNIK
-                year = year_from
-                year_match = re.search(r'\b(19\d{2}|20\d{2})\b', raw_text)
-                if year_match:
-                    year = int(year_match.group(1))
-
-                if not (int(year_from) <= year <= int(year_to)):
-                    continue
+                mileage_matches = re.findall(r'\b(\d{1,3}(?: \d{3})*|\d{1,7})\s*km\b', raw_text)
+                if mileage_matches:
+                    mileages = [int(m.replace(' ', '')) for m in mileage_matches]
+                    valid_mileages = [m for m in mileages if m > 0]
+                    if valid_mileages:
+                        mileage = max(valid_mileages)
                 
                 link_elem = art.find('a', href=True)
                 offer_url = link_elem['href'] if link_elem else ""
@@ -139,8 +142,6 @@ def scrape_and_update(category, brand, model, year_from, year_to):
                     pub_date = date_match.group(1).capitalize()
 
                 if price > 0:
-                    page_found += 1
-                    
                     cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (otomoto_id,))
                     row = cursor.fetchone()
                     
@@ -166,8 +167,6 @@ def scrape_and_update(category, brand, model, year_from, year_to):
             except Exception:
                 continue
         
-        if page_found == 0:
-            break
         page += 1
 
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
