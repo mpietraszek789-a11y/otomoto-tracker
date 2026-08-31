@@ -42,42 +42,36 @@ def init_db():
     conn.commit()
     conn.close()
 
-def extract_and_save_offer(art, cursor, now_time_str, brand, model, year_from, year_to, model_parts, enforce_filters):
+def extract_and_save_offer(art, cursor, now_time_str, brand, model, year_from, year_to, model_parts):
     otomoto_id = art.get('id') or art.get('data-id')
     if not otomoto_id:
         return False
 
     raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
 
-    if enforce_filters and model_parts:
+    # Luźniejsze sprawdzenie modelu w tytule
+    if model_parts:
         text_norm = re.sub(r'[^a-z0-9]', '', raw_text.lower())
         if not all(part in text_norm for part in model_parts if part):
             return False
 
+    # Cena
     price = 0.0
     price_matches = re.findall(r'(\d{1,3}(?: \d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
     if price_matches:
         prices = [float(p[0].replace(' ', '')) for p in price_matches]
         valid_prices = [p for p in prices if 3000 < p < 5000000]
         if valid_prices:
-            price = max(valid_prices) # Omijanie leasingu
+            price = max(valid_prices) # Omijanie rat leasingowych
 
+    # Rok – jeśli w tekście znajdzie się jakikolwiek rok z przedziału, bierzemy go, a jak nie, przypisujemy rok początkowy wyszukiwania
     year = year_from
-    if enforce_filters:
-        year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
-        valid_year = None
-        for ym in year_matches:
-            ym_int = int(ym)
-            if int(year_from) <= ym_int <= int(year_to) and ym_int != price:
-                valid_year = ym_int
-                break 
-        if not valid_year:
-            return False
-        year = valid_year
-    else:
-        year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
-        if year_matches:
-            year = int(year_matches[0])
+    year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
+    for ym in year_matches:
+        ym_int = int(ym)
+        if int(year_from) <= ym_int <= int(year_to) and ym_int != price:
+            year = ym_int
+            break
 
     title_elem = art.find('h1') or art.find('h2') or art.find('h6') or art.find('a')
     title = title_elem.text.strip() if title_elem else f"{brand} {model}"
@@ -145,14 +139,13 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     b_slug = brand_clean.lower().replace(" ", "-")
     m_slug = model_clean.lower().replace(" ", "-")
 
-    # 1. KROK: Sprawdzamy oficjalną liczbę aut bezpośrednio ze strony Otomoto (dla weryfikacji)
+    # Sprawdzenie liczby ofert na Otomoto
     otomoto_total_expected = 0
     test_url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
     try:
         resp = session.get(test_url, timeout=10)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Szukamy tekstu typu "98 ogłoszeń"
             match = re.search(r'(\d[\d\s]*)\s*ogłosze[ńn]', soup.text, re.IGNORECASE)
             if match:
                 otomoto_total_expected = int(match.group(1).replace(' ', ''))
@@ -162,13 +155,12 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     total_found = 0
 
     if custom_url and "otomoto.pl" in custom_url:
-        # Obsługa opcjonalnego linku ręcznego
         page = 1
         previous_ids = set()
         while page <= 25:
             url = f"{custom_url}&page={page}" if '?' in custom_url else f"{custom_url}?page={page}"
             try:
-                time.sleep(random.uniform(0.5, 1.0))
+                time.sleep(random.uniform(0.4, 0.8))
                 resp = session.get(url, timeout=10)
                 if resp.status_code != 200: break
             except:
@@ -182,7 +174,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             for art in articles:
                 oid = art.get('id') or art.get('data-id')
                 if oid: current_ids.add(oid)
-                if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts, enforce_filters=False):
+                if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts):
                     total_found += 1
             
             overlap = len(current_ids.intersection(previous_ids))
@@ -190,21 +182,17 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             previous_ids = current_ids
             page += 1
     else:
-        # 2. KROK: Zautomatyzowane Mikrokoszyki (Hardcodowane URL-e zapobiegające błędom biblioteki)
-        # 16 gęstych koszyków cenowych. Każdy zmieści < 30 aut, więc NIGDY nie musimy wejść na stronę nr 2!
+        # Koszyki cenowe szerokie na 50 tysięcy zł – bezpieczne i pokrywające całe spektrum
         price_brackets = [
-            (0, 60000), (60001, 80000), (80001, 100000), (100001, 120000),
-            (120001, 140000), (140001, 160000), (160001, 180000), (180001, 200000),
-            (200001, 230000), (230001, 270000), (270001, 310000), (310001, 350000),
-            (350001, 400000), (400001, 500000), (500001, 5000000)
+            (0, 50000), (50001, 100000), (100001, 150000), (150001, 200000),
+            (200001, 250000), (250001, 350000), (350001, 500000), (500001, 5000000)
         ]
         
         for p_min, p_max in price_brackets:
-            # RĘCZNIE wklejony URL z dokładnie takimi znakami, jakich żąda serwer Otomoto. Brak ucinania filtrów!
             url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
             
             try:
-                time.sleep(random.uniform(0.5, 0.9)) # Przerwa, żeby udawać człowieka
+                time.sleep(random.uniform(0.4, 0.8))
                 resp = session.get(url, timeout=10)
                 if resp.status_code != 200: continue
             except:
@@ -214,10 +202,9 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             articles = soup.find_all('article')
             
             for art in articles:
-                if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts, enforce_filters=True):
+                if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to, model_parts):
                     total_found += 1
 
-    # Oznaczanie sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -229,13 +216,12 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     conn.commit()
     conn.close()
     
-    # Tworzenie raportu 
     if not custom_url:
         if otomoto_total_expected == 0:
-            return f"Sukces! Skrypt zapisał: {total_found} ofert dla tych kryteriów."
-        elif total_found >= (otomoto_total_expected - 5): # Drobny margines na auta zepsute/usunięte w trakcie
-            return f"✅ Idealnie! Otomoto pokazuje {otomoto_total_expected} ofert, a skrypt zapisał {total_found}."
+            return f"Sukces! Zapisano: {total_found} ofert."
+        elif total_found >= (otomoto_total_expected - 5):
+            return f"✅ Idealnie! Otomoto pokazuje {otomoto_total_expected}, skrypt zapisał {total_found}."
         else:
-            return f"⚠️ Pomyślnie zapisano {total_found} ofert, jednak Otomoto twierdzi, że ma ich {otomoto_total_expected}."
+            return f"⚠️ Zapisano {total_found} ofert (Otomoto deklaruje {otomoto_total_expected})."
     else:
-        return f"Sukces (Z gotowego linku). Przeanalizowano i zapisano: {total_found} ofert."
+        return f"Sukces z linku. Zapisano: {total_found} ofert."
