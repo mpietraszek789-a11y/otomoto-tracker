@@ -42,7 +42,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def scrape_and_update(brand, model, year_from, year_to):
+def scrape_and_update(category, brand, model, year_from, year_to):
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -50,25 +50,30 @@ def scrape_and_update(brand, model, year_from, year_to):
     brand_clean = brand.strip().lower()
     model_clean = model.strip().lower().replace(" ", "-")
     
+    # Przełącznik kategorii URL (Motocykle vs Osobowe)
+    category_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     }
     
-    # NAPRAWA CZASU: Wymuszamy czas polski niezależnie od tego, gdzie stoi serwer!
     now_time = datetime.now(ZoneInfo("Europe/Warsaw"))
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
     
     page = 1
     max_pages = 20 
     
+    # Przygotowujemy model do twardego sprawdzania (usuwamy spacje i myślniki, zostawiamy same litery/cyfry)
+    # Przykład: "MT-07" zamienia na "mt07", co zapobiega pomyłkom.
+    search_model_norm = re.sub(r'[^a-z0-9]', '', model.lower())
+    
     while page <= max_pages:
-        url = f"https://www.otomoto.pl/osobowe/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
+        url = f"https://www.otomoto.pl/{category_slug}/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
         
         try:
             time.sleep(random.uniform(0.5, 1.0))
-            
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code != 200:
                 break
@@ -90,6 +95,14 @@ def scrape_and_update(brand, model, year_from, year_to):
 
                 raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
                 
+                title_elem = art.find('h2') or art.find('a')
+                title = title_elem.text.strip() if title_elem else f"{brand} {model}"
+                
+                # TWARDY FILTR MODELU: Jeśli szukasz GLA, odrzuca CLA. Jeśli szukasz MT-07, odrzuca inne.
+                title_norm = re.sub(r'[^a-z0-9]', '', title.lower())
+                if search_model_norm not in title_norm:
+                    continue  # Pomijamy to ogłoszenie i idziemy do następnego
+                
                 # CENA
                 price = 0.0
                 price_matches = re.findall(r'\b(\d{1,3}(?:\s\d{3})+|\d{3,7})\s*(?:PLN|EUR)', raw_text)
@@ -102,7 +115,7 @@ def scrape_and_update(brand, model, year_from, year_to):
                 mileage = 0
                 mileage_matches = re.findall(r'\b(\d{1,3}(?:\s\d{3})+|\d{1,7})\s*km\b', raw_text)
                 mileages = [int(m.replace(' ', '')) for m in mileage_matches]
-                valid_mileages = [m for m in mileages if m > 500]
+                valid_mileages = [m for m in mileages if m > 0]
                 if valid_mileages:
                     mileage = max(valid_mileages)
                 elif mileages:
@@ -116,14 +129,10 @@ def scrape_and_update(brand, model, year_from, year_to):
 
                 if not (int(year_from) <= year <= int(year_to)):
                     continue
-
-                title_elem = art.find('h2') or art.find('a')
-                title = title_elem.text.strip() if title_elem else f"{brand} {model}"
                 
                 link_elem = art.find('a', href=True)
                 offer_url = link_elem['href'] if link_elem else ""
 
-                # NAPRAWA DATY: Rozpoznawanie "Dzisiaj", "Wczoraj" lub pełnej polskiej daty (np. 15 sierpnia 2026)
                 pub_date = "Brak danych"
                 date_match = re.search(r'(Dzisiaj|Wczoraj|\d{1,2}\s(?:stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s\d{4})', raw_text, re.IGNORECASE)
                 if date_match:
@@ -179,4 +188,4 @@ def scrape_and_update(brand, model, year_from, year_to):
 
     conn.commit()
     conn.close()
-    return f"Sukces! Skrypt przeszedł {page-1} stron. Aktualnie w bazie: {total_active}."
+    return f"Sukces! Przeszukano {page-1} stron ({category}). Czystych ofert w bazie: {total_active}."
