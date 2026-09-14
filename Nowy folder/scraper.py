@@ -73,60 +73,48 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     cat_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
     b_slug, m_slug = build_otomoto_slugs(brand, model)
 
-    brand_clean = brand.strip().lower()
-    model_clean = model.strip().lower()
-
     new_inserts = 0
     updates = 0
     processed_this_run = set()
-    previous_page_ids = set()
-    
-    page = 1
-    max_pages = 25 # Umożliwia przejście do 25 podstron (ponad 700-800 ofert)
 
-    while page <= max_pages:
+    # Tworzymy gęste przedziały cenowe (co 15 tys. PLN), aby każdy "plasterek" mieścił się na 1 stronie (<30 aut)
+    price_brackets = [(i, i + 14999) for i in range(0, 400000, 15000)]
+    price_brackets.append((400000, 5000000))
+
+    for p_min, p_max in price_brackets:
         if custom_url and "otomoto.pl" in custom_url:
-            base_url = custom_url.split('&page=')[0].split('?page=')[0]
-            url = f"{base_url}&page={page}" if '?' in base_url else f"{base_url}?page={page}"
+            clean_url = custom_url.split('&page=')[0].split('?page=')[0]
+            separator = "&" if "?" in clean_url else "?"
+            url = f"{clean_url}{separator}search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
         else:
-            url = f"https://www.otomoto.pl/{cat_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
+            url = f"https://www.otomoto.pl/{cat_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}&search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
 
         try:
-            time.sleep(random.uniform(0.4, 0.8))
+            time.sleep(random.uniform(0.3, 0.6))
             resp = session.get(url, timeout=10)
             if resp.status_code != 200:
-                break
+                continue
         except:
-            break
+            continue
 
         soup = BeautifulSoup(resp.text, 'html.parser')
         articles = soup.find_all('article')
         
         if not articles:
-            break
-
-        current_page_ids = set()
+            continue
 
         for art in articles:
             oid = art.get('id') or art.get('data-id')
-            if not oid:
-                continue
-            
-            current_page_ids.add(oid)
-            
-            if oid in processed_this_run:
+            if not oid or oid in processed_this_run:
                 continue
 
             raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
             text_lower = raw_text.lower()
 
-            if brand_clean not in text_lower and "mercedes" not in text_lower and "bmw" not in text_lower:
-                pass # Łagodzimy twardy filtr nazwy, ufając strukturze URL Otomoto
-
             title_elem = art.find('h1') or art.find('h2') or art.find('h6')
             title = title_elem.text.strip() if title_elem else f"{brand} {model}"
 
-            # Wyciąganie ceny
+            # Cena
             price = 0.0
             p_matches = re.findall(r'(\d{1,3}(?:[ \.]\d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
             if p_matches:
@@ -138,7 +126,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             if price == 0:
                 continue
 
-            # Wyciąganie rocznika
+            # Rocznik
             year = None
             for tag in art.find_all(['li', 'dd', 'span', 'p', 'div']):
                 t_str = tag.text.strip()
@@ -168,7 +156,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
 
             processed_this_run.add(oid)
 
-            # Zapis do bazy danych
             cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (oid,))
             row = cursor.fetchone()
             
@@ -192,14 +179,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
                 new_inserts += 1
 
-        # Prawidłowy mechanizm anty-pętlowy: sprawdza czy nowa strona to dokładnie to samo co poprzednia
-        overlap = len(current_page_ids.intersection(previous_page_ids))
-        if page > 1 and overlap >= 20: 
-            break
-            
-        previous_page_ids = current_page_ids
-        page += 1
-
     # Oznaczanie sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
@@ -220,4 +199,4 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     conn.close()
 
     total_processed = new_inserts + updates
-    return f"✅ Sukces! Przejrzano {page-1} stron. Przetworzono ofert: {total_processed} (Nowych: {new_inserts}, Aktualizacji: {updates}). Aktywnych w bazie: {active_in_db} szt."
+    return f"✅ Sukces! Metoda mikro-koszyków pobrała: {total_processed} unikalnych ofert (Nowych: {new_inserts}, Aktualizacji: {updates}). Aktywnych w bazie: {active_in_db} szt."
