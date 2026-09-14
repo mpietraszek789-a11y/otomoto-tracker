@@ -6,6 +6,7 @@ import time
 import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 def get_connection():
     return sqlite3.connect('otomoto.db')
@@ -42,87 +43,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-def extract_and_save_offer(art, cursor, now_time_str, brand, model, year_from, year_to):
-    otomoto_id = art.get('id') or art.get('data-id')
-    if not otomoto_id:
-        return False
-
-    raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
-
-    # 1. CENA
-    price = 0.0
-    price_matches = re.findall(r'(\d{1,3}(?: \d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
-    if price_matches:
-        prices = [float(p[0].replace(' ', '')) for p in price_matches]
-        valid_prices = [p for p in prices if 3000 < p < 5000000]
-        if valid_prices:
-            price = max(valid_prices) # Bierzemy MAX, żeby ominąć raty leasingu
-
-    if price == 0:
-        return False
-
-    # 2. BEZWZGLĘDNY FILTR ROCZNIKA (Koniec z duchami!)
-    # Szuka rocznika z Twojego przedziału. Jeśli ogłoszenie go nie ma (bo to "Oferta Promowana") -> ODRZUCA.
-    year = None
-    year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
-    for ym in year_matches:
-        ym_int = int(ym)
-        if int(year_from) <= ym_int <= int(year_to) and ym_int != price:
-            year = ym_int
-            break
-            
-    if not year:
-        return False
-
-    # 3. PODSTAWOWY FILTR MARKI/MODELU (Odrzuca "Zobacz także")
-    brand_model_check = f"{brand} {model}".lower()
-    if brand.lower() not in raw_text.lower() and model.lower() not in raw_text.lower():
-        return False
-
-    title_elem = art.find('h1') or art.find('h2') or art.find('h6') or art.find('a')
-    title = title_elem.text.strip() if title_elem else f"{brand} {model}"
-
-    # 4. PRZEBIEG
-    mileage = 0
-    mileage_matches = re.findall(r'\b(\d{1,3}(?: \d{3})*|\d{1,7})\s*km\b', raw_text)
-    if mileage_matches:
-        mileages = [int(m.replace(' ', '')) for m in mileage_matches]
-        valid_mileages = [m for m in mileages if m > 0]
-        if valid_mileages:
-            mileage = max(valid_mileages)
-    
-    link_elem = art.find('a', href=True)
-    offer_url = link_elem['href'] if link_elem else ""
-
-    pub_date = "Brak danych"
-    date_match = re.search(r'(Dzisiaj|Wczoraj|\d{1,2}\s(?:stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s\d{4})', raw_text, re.IGNORECASE)
-    if date_match:
-        pub_date = date_match.group(1).capitalize()
-
-    # ZAPIS DO BAZY
-    cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (otomoto_id,))
-    row = cursor.fetchone()
-    
-    if row:
-        offer_db_id, old_price = row
-        if old_price != price:
-            cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
-        
-        cursor.execute("""
-            UPDATE offers 
-            SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ? 
-            WHERE id = ?
-        """, (price, mileage, now_time_str, offer_db_id))
-    else:
-        cursor.execute('''
-            INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', ?, ?, ?)
-        ''', (otomoto_id, brand.strip(), model.strip(), year, title, mileage, price, offer_url, pub_date, now_time_str, now_time_str))
-        
-        new_id = cursor.lastrowid
-        cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
-    
-    return True
+def update_url_page(url, page):
+    """Profesjonalne nadpisywanie numeru strony w linku, bez złośliwego duplikowania parametrów"""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    query['page'] = [str(page)]
+    new_query = urlencode(query, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
 
 def scrape_and_update(category, brand, model, year_from, year_to, custom_url=""):
     init_db()
@@ -137,77 +64,148 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     
     now_time = datetime.now(ZoneInfo("Europe/Warsaw"))
     now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
-    
-    brand_clean = brand.strip()
-    model_clean = model.strip()
-    
-    category_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
-    b_slug = brand_clean.lower().replace(" ", "-")
-    m_slug = model_clean.lower().replace(" ", "-")
 
-    otomoto_total_expected = 0
+    # Jeśli użytkownik nie wklei gotowego linku, budujemy go czysto
     if not custom_url:
-        test_url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}"
-        try:
-            resp = session.get(test_url, timeout=10)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                match = re.search(r'(\d[\d\s]*)\s*ogłosze[ńn]', soup.text, re.IGNORECASE)
-                if match:
-                    otomoto_total_expected = int(match.group(1).replace(' ', ''))
-        except Exception:
-            pass
+        brand_clean = brand.strip().lower().replace(" ", "-")
+        model_clean = model.strip().lower().replace(" ", "-")
+        cat_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
+        custom_url = f"https://www.otomoto.pl/{cat_slug}/{brand_clean}/{model_clean}?search%5Bfilter_float_year%3Afrom%5D={year_from}&search%5Bfilter_float_year%3Ato%5D={year_to}"
 
-    total_found = 0
     page = 1
+    new_inserts = 0
+    updates = 0
     previous_ids = set()
-
-    # KONIEC Z KOSZYKAMI CENOWYMI. Prosta, klasyczna pętla stron.
+    processed_this_run = set() # Zabezpieczenie przed podwójnym zliczaniem
+    
     while page <= 25:
-        if custom_url and "otomoto.pl" in custom_url:
-            url = f"{custom_url}&page={page}" if '?' in custom_url else f"{custom_url}?page={page}"
-        else:
-            url = f"https://www.otomoto.pl/{category_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
-
+        url = update_url_page(custom_url, page)
+        
         try:
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(0.5, 1.2))
             resp = session.get(url, timeout=10)
-            if resp.status_code != 200: break
+            if resp.status_code != 200: 
+                break
         except:
             break
-
+            
         soup = BeautifulSoup(resp.text, 'html.parser')
-        articles = soup.find_all('article')
-        if not articles: break
-
+        
+        # BŁĄD NAPRAWIONY: Bierzemy tylko faktyczne kafelki ogłoszeń, ignorując banery i artykuły
+        articles = soup.find_all('article', attrs={"data-testid": "listing-ad"})
+        if not articles: 
+            break 
+            
         current_ids = set()
         for art in articles:
             oid = art.get('id') or art.get('data-id')
-            if oid: current_ids.add(oid)
+            if not oid: continue
+            current_ids.add(oid)
             
-            # Właściwa weryfikacja - przepuszcza tylko prawilne auta
-            if extract_and_save_offer(art, cursor, now_time_str, brand_clean, model_clean, year_from, year_to):
-                total_found += 1
+            # Weryfikacja duplikatów: jeśli na tej stronie znów są te same promowane oferty, ignorujemy!
+            if oid in processed_this_run:
+                continue
+            
+            title_elem = art.find('h1') or art.find('h2') or art.find('h6')
+            if not title_elem:
+                continue
+            title = title_elem.text.strip()
+            
+            a_elem = art.find('a', href=True)
+            offer_url = a_elem['href'] if a_elem else ""
+            
+            # Cena - szukamy konkretnie bloku z ceną, omijając raty miesięczne
+            price = 0.0
+            price_text_elem = art.find('span', string=re.compile(r'PLN|EUR', re.IGNORECASE))
+            if price_text_elem:
+                p_text = price_text_elem.text.replace(' ', '')
+                match = re.search(r'(\d+)', p_text)
+                if match:
+                    val = float(match.group(1))
+                    if 3000 < val < 5000000:
+                        price = val
+            
+            if price == 0:
+                raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
+                p_matches = re.findall(r'(\d{1,3}(?: \d{3})*|\d{4,7})\s*(PLN|EUR)', raw_text, re.IGNORECASE)
+                if p_matches:
+                    vals = [float(p[0].replace(' ', '')) for p in p_matches]
+                    valid_vals = [v for v in vals if 3000 < v < 5000000]
+                    if valid_vals: price = max(valid_vals)
+                    
+            if price == 0:
+                continue
 
-        # Zapobieganie zacięciu: jeśli strona 2 to znów strona 1, kończymy
+            # BŁĄD NAPRAWIONY: Szukamy Rocznika i Przebiegu TYLKO w specjalnych komórkach parametrów, 
+            # a nie w całym zlepku słów.
+            year = year_from
+            mileage = 0
+            
+            params_elements = art.find_all(['dd', 'li'])
+            for elem in params_elements:
+                txt = elem.text.strip().replace(' ', '')
+                if 'km' in txt.lower():
+                    m_match = re.search(r'(\d+)', txt)
+                    if m_match: mileage = int(m_match.group(1))
+                # Dokładne sprawdzenie, czy ta komórka to wyłącznie 4 cyfry
+                elif re.fullmatch(r'19\d{2}|20\d{2}', txt):
+                    year = int(txt)
+                    
+            # Weryfikacja roku – jeśli to ułuda z promowanych ofert, wyrzucamy auto.
+            if not (int(year_from) <= year <= int(year_to)):
+                continue
+
+            # Auto przeszło filtry! Dodajemy do przetworzonych
+            processed_this_run.add(oid)
+
+            cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (oid,))
+            row = cursor.fetchone()
+            
+            if row:
+                offer_db_id, old_price = row
+                if old_price != price:
+                    cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
+                cursor.execute("""
+                    UPDATE offers 
+                    SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ? 
+                    WHERE id = ?
+                """, (price, mileage, now_time_str, offer_db_id))
+                updates += 1
+            else:
+                cursor.execute('''
+                    INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?)
+                ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, now_time_str, now_time_str))
+                
+                new_id = cursor.lastrowid
+                cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
+                new_inserts += 1
+
+        # Zabezpieczenie anty-botowe (jeśli strona 2 ma 90% identycznych aut co strona 1, kończymy)
         overlap = len(current_ids.intersection(previous_ids))
-        if page > 1 and overlap >= 15: break
+        if page > 1 and overlap >= 20: 
+            break
+            
         previous_ids = current_ids
         page += 1
 
-    # Oznacz jako sprzedane
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
         SET status = 'Sprzedane' 
         WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) 
           AND production_year BETWEEN ? AND ? AND last_seen_at < ?
-    ''', (brand_clean, model_clean, year_from, year_to, limit_time))
+    ''', (brand.strip().lower(), model.strip().lower(), year_from, year_to, limit_time))
+
+    cursor.execute('''
+        SELECT COUNT(*) FROM offers 
+        WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) 
+          AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
+    ''', (brand.strip().lower(), model.strip().lower(), year_from, year_to))
+    active_in_db = cursor.fetchone()[0]
 
     conn.commit()
     conn.close()
 
-    if not custom_url:
-        return f"Info: Otomoto wskazuje ogólnie {otomoto_total_expected} ofert (z promowanymi), skrypt zapisał dokładnie {total_found} unikalnych dla tego zapytania."
-    else:
-        return f"Sukces z linku. Zapisano: {total_found} ofert."
+    total_processed = new_inserts + updates
+    return f"✅ Raport: Pobrano dokładnie {total_processed} unikalnych ofert (Dodano nowych: {new_inserts}, Zaktualizowano: {updates}). Aktualnie w bazie dla tych kryteriów: {active_in_db} aut."
