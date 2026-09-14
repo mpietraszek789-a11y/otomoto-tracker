@@ -43,7 +43,6 @@ def init_db():
     conn.close()
 
 def build_otomoto_slugs(brand, model):
-    """Buduje poprawną ścieżkę dokładnie tak, jak wymaga tego Otomoto"""
     b = brand.strip().lower().replace(" ", "-")
     m = model.strip().lower().replace(" ", "-")
     
@@ -80,15 +79,16 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     new_inserts = 0
     updates = 0
     processed_this_run = set()
+    previous_page_ids = set()
+    
     page = 1
-    max_pages = 25 # Pozwala na pobranie do ~750-800 ofert
+    max_pages = 25 # Umożliwia przejście do 25 podstron (ponad 700-800 ofert)
 
     while page <= max_pages:
         if custom_url and "otomoto.pl" in custom_url:
             base_url = custom_url.split('&page=')[0].split('?page=')[0]
             url = f"{base_url}&page={page}" if '?' in base_url else f"{base_url}?page={page}"
         else:
-            # Dokładnie wzorowane na Twoim wzorcu linku!
             url = f"https://www.otomoto.pl/{cat_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}&page={page}"
 
         try:
@@ -102,12 +102,10 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
         soup = BeautifulSoup(resp.text, 'html.parser')
         articles = soup.find_all('article')
         
-        # Jeśli strona nie zawiera artykułów, kończymy pętlę (doszliśmy do końca)
         if not articles:
             break
 
         current_page_ids = set()
-        valid_on_page = 0
 
         for art in articles:
             oid = art.get('id') or art.get('data-id')
@@ -115,20 +113,20 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 continue
             
             current_page_ids.add(oid)
+            
             if oid in processed_this_run:
                 continue
 
             raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
             text_lower = raw_text.lower()
 
-            # Twarde sprawdzenie, czy to właściwy pojazd (odrzucamy całkowicie obce reklamy)
-            if brand_clean not in text_lower and "mercedes" not in text_lower:
-                continue
+            if brand_clean not in text_lower and "mercedes" not in text_lower and "bmw" not in text_lower:
+                pass # Łagodzimy twardy filtr nazwy, ufając strukturze URL Otomoto
 
             title_elem = art.find('h1') or art.find('h2') or art.find('h6')
             title = title_elem.text.strip() if title_elem else f"{brand} {model}"
 
-            # Wyciąganie ceny (odrzucanie rat leasingowych)
+            # Wyciąganie ceny
             price = 0.0
             p_matches = re.findall(r'(\d{1,3}(?:[ \.]\d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
             if p_matches:
@@ -140,7 +138,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             if price == 0:
                 continue
 
-            # Precyzyjne wyciąganie rocznika
+            # Wyciąganie rocznika
             year = None
             for tag in art.find_all(['li', 'dd', 'span', 'p', 'div']):
                 t_str = tag.text.strip()
@@ -153,7 +151,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                         year = y_val
                         break
 
-            # Jeśli algorytm nie znalazł rocznika w tagach, przypisujemy domyślny z zapytania
             if not year:
                 year = int(year_from)
 
@@ -170,7 +167,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
             offer_url = a_elem['href'] if a_elem else ""
 
             processed_this_run.add(oid)
-            valid_on_page += 1
 
             # Zapis do bazy danych
             cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (oid,))
@@ -196,13 +192,15 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
                 new_inserts += 1
 
-        # Mechanizm anty-pętlowy: jeśli kolejna strona zwraca dokładnie te same auta, przerywamy pętrzenie
-        if page > 1 and len(current_page_ids.intersection(processed_this_run)) == 0:
+        # Prawidłowy mechanizm anty-pętlowy: sprawdza czy nowa strona to dokładnie to samo co poprzednia
+        overlap = len(current_page_ids.intersection(previous_page_ids))
+        if page > 1 and overlap >= 20: 
             break
             
+        previous_page_ids = current_page_ids
         page += 1
 
-    # Oznaczanie nieaktywnych jako sprzedane
+    # Oznaczanie sprzedanych
     limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         UPDATE offers 
@@ -222,4 +220,4 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     conn.close()
 
     total_processed = new_inserts + updates
-    return f"✅ Sukces! Przejrzano strony. Przetworzono ofert: {total_processed} (Nowych: {new_inserts}, Aktualizacji: {updates}). Aktywnych w bazie: {active_in_db} szt."
+    return f"✅ Sukces! Przejrzano {page-1} stron. Przetworzono ofert: {total_processed} (Nowych: {new_inserts}, Aktualizacji: {updates}). Aktywnych w bazie: {active_in_db} szt."
