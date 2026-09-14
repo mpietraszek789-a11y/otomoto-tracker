@@ -22,18 +22,32 @@ brand = st.sidebar.text_input("Marka (do bazy)", default_brand)
 model = st.sidebar.text_input("Model (do bazy)", default_model)
 
 col1, col2 = st.sidebar.columns(2)
-year_from = col1.number_input("Rocznik Od", 1990, 2026, 2017)
+year_from = col1.number_input("Rocznik Od", 1990, 2026, 2022)
 year_to = col2.number_input("Rocznik Do", 1990, 2026, 2022)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔗 Alternatywa: Gotowy link")
-st.sidebar.caption("Jeśli masz specyficzne filtry (kolor, automat, paliwo), ustaw je na Otomoto i wklej tu pełny link z przeglądarki. Upewnij się, że Marka i Model wyżej się zgadzają, by poprawnie przypisać je do tabeli.")
+st.sidebar.caption("Jeśli masz specyficzne filtry (kolor, automat, paliwo), ustaw je na Otomoto i wklej tu pełny link z przeglądarki.")
 custom_url = st.sidebar.text_input("Wklej gotowy link z Otomoto:")
 
 if st.sidebar.button("Pobierz / Odśwież dane z Otomoto", type="primary"):
-    with st.spinner("Pobieram oferty... Ze względu na omijanie blokad może to potrwać kilkanaście sekund."):
+    with st.spinner("Pobieram oferty... To może chwilę potrwać."):
         msg = scrape_and_update(category, brand, model, year_from, year_to, custom_url)
         st.sidebar.success(msg)
+
+st.sidebar.markdown("---")
+if st.sidebar.button("🗑️ Wyczyść bazę danych (Reset)", type="secondary"):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DROP TABLE IF EXISTS price_history")
+        cursor.execute("DROP TABLE IF EXISTS offers")
+        conn.commit()
+        conn.close()
+        init_db()
+        st.sidebar.success("Baza została całkowicie wyczyszczona! Zniknęły wszystkie błędy. Pobierz dane od nowa.")
+    except Exception as e:
+        st.sidebar.error("Błąd podczas czyszczenia bazy.")
 
 # Odczyt danych z bazy
 try:
