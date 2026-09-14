@@ -1,152 +1,202 @@
-import streamlit as st
-import pandas as pd
-from scraper import get_connection, init_db, scrape_and_update
+import sqlite3
+import requests
+from bs4 import BeautifulSoup
+import re
+import time
+import random
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-st.set_page_config(page_title="Otomoto Tracker dla Taty", layout="wide")
+def get_connection():
+    return sqlite3.connect('otomoto.db')
 
-try:
-    init_db()
-except Exception:
-    pass
-
-st.title("🏍️🚗 Otomoto Tracker - Podgląd Ofert")
-
-# Panel boczny
-st.sidebar.header("Kryteria Wyszukiwania")
-category = st.sidebar.radio("Kategoria", ["Motocykle", "Osobowe"])
-
-default_brand = "Yamaha" if category == "Motocykle" else "Mercedes-Benz"
-default_model = "MT-07" if category == "Motocykle" else "CLA"
-
-brand = st.sidebar.text_input("Marka (do bazy)", default_brand)
-model = st.sidebar.text_input("Model (do bazy)", default_model)
-
-col1, col2 = st.sidebar.columns(2)
-year_from = col1.number_input("Rocznik Od", 1990, 2026, 2022)
-year_to = col2.number_input("Rocznik Do", 1990, 2026, 2022)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔗 Alternatywa: Gotowy link")
-st.sidebar.caption("Jeśli masz specyficzne filtry (kolor, automat, paliwo), ustaw je na Otomoto i wklej tu pełny link z przeglądarki.")
-custom_url = st.sidebar.text_input("Wklej gotowy link z Otomoto:")
-
-if st.sidebar.button("Pobierz / Odśwież dane z Otomoto", type="primary"):
-    with st.spinner("Pobieram oferty... To może chwilę potrwać."):
-        msg = scrape_and_update(category, brand, model, year_from, year_to, custom_url)
-        st.sidebar.success(msg)
-
-st.sidebar.markdown("---")
-if st.sidebar.button("🗑️ Wyczyść bazę danych (Reset)", type="secondary"):
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DROP TABLE IF EXISTS price_history")
-        cursor.execute("DROP TABLE IF EXISTS offers")
-        conn.commit()
-        conn.close()
-        init_db()
-        st.sidebar.success("Baza została całkowicie wyczyszczona! Zniknęły wszystkie błędy. Pobierz dane od nowa.")
-    except Exception as e:
-        st.sidebar.error("Błąd podczas czyszczenia bazy.")
-
-# Odczyt danych z bazy
-try:
+def init_db():
     conn = get_connection()
-    query = '''
-        SELECT id, otomoto_id, production_year as Rocznik, title as Oferta, 
-               current_price as "Cena (PLN)", mileage_km as "Przebieg (km)", 
-               status as Status, publication_date as "Data publikacji", 
-               last_seen_at as "Ostatnia aktualizacja", url as Link
-        FROM offers 
-        WHERE LOWER(brand) = LOWER(?) 
-          AND LOWER(model) = LOWER(?)
-          AND production_year BETWEEN ? AND ?
-        ORDER BY first_seen_at DESC, "Cena (PLN)" ASC
-    '''
-    df = pd.read_sql(query, conn, params=(brand.strip(), model.strip(), int(year_from), int(year_to)))
-    
-    if not df.empty:
-        dynamic_statuses = []
-        cursor = conn.cursor()
-        for idx, row in df.iterrows():
-            if row['Status'] == 'Sprzedane':
-                dynamic_statuses.append('Sprzedane')
-                continue
-                
-            cursor.execute("SELECT price FROM price_history WHERE offer_id = ? ORDER BY recorded_at ASC LIMIT 1", (row['id'],))
-            first_row = cursor.fetchone()
-            
-            if first_row:
-                first_price = first_row[0]
-                if first_price != row['Cena (PLN)']:
-                    dynamic_statuses.append('Zmieniono cenę')
-                else:
-                    dynamic_statuses.append('Aktywne')
-            else:
-                dynamic_statuses.append(row['Status'])
-                
-        df['Dynamic_Status'] = dynamic_statuses
-    else:
-        df['Dynamic_Status'] = []
-        
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            otomoto_id TEXT UNIQUE NOT NULL,
+            brand TEXT NOT NULL,
+            model TEXT NOT NULL,
+            production_year INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            mileage_km INTEGER,
+            current_price REAL NOT NULL,
+            url TEXT NOT NULL,
+            status TEXT DEFAULT 'Aktywne',
+            publication_date TEXT,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER,
+            price REAL NOT NULL,
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(offer_id) REFERENCES offers(id) ON DELETE CASCADE
+        )
+    ''')
+    conn.commit()
     conn.close()
-except Exception as e:
-    df = pd.DataFrame()
 
-if df.empty:
-    st.info("Brak danych w bazie. Upewnij się, że kategoria, marka i model są poprawne (lub wklej link), a następnie kliknij pobieranie!")
-else:
-    years = sorted(df['Rocznik'].unique(), reverse=True)
-    tabs = st.tabs([f"Rocznik {y}" for y in years] + ["🕒 Historia Ofert (Filtry i Sortowanie)"])
+def build_otomoto_slugs(brand, model):
+    b = brand.strip().lower().replace(" ", "-")
+    m = model.strip().lower().replace(" ", "-")
+    
+    if b in ["mercedes", "mercedes-benz"]:
+        b = "mercedes-benz"
+        if not m.endswith("-klasa") and m in ["a", "b", "c", "e", "s", "g", "v", "cla", "cls", "clk", "glk", "gla", "glb", "glc", "gle", "gls", "slk", "slc"]:
+            m = f"{m}-klasa"
+            
+    elif b == "bmw" and re.match(r'^[1-8]$', m):
+        m = f"seria-{m}"
+            
+    return b, m
 
-    for idx, year in enumerate(years):
-        with tabs[idx]:
-            active_year_raw = df[(df['Rocznik'] == year) & (df['Status'] == 'Aktywne')]
-            
-            avg_price = active_year_raw["Cena (PLN)"].mean() if not active_year_raw.empty else 0
-            avg_mileage = active_year_raw["Przebieg (km)"].mean() if not active_year_raw.empty else 0
+def scrape_and_update(category, brand, model, year_from, year_to, custom_url=""):
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'pl-PL,pl;q=0.9',
+    })
+    
+    now_time = datetime.now(ZoneInfo("Europe/Warsaw"))
+    now_time_str = now_time.strftime("%Y-%m-%d %H:%M:%S")
 
-            m1, m2 = st.columns(2)
-            m1.metric("💰 Średnia Cena", f"{avg_price:,.0f} PLN".replace(",", " "))
-            m2.metric("🛣️ Średni Przebieg", f"{avg_mileage:,.0f} km".replace(",", " "))
+    cat_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
+    b_slug, m_slug = build_otomoto_slugs(brand, model)
+
+    new_inserts = 0
+    updates = 0
+    processed_this_run = set()
+
+    # Tworzymy gęste przedziały cenowe (co 15 tys. PLN), aby każdy "plasterek" mieścił się na 1 stronie (<30 aut)
+    price_brackets = [(i, i + 14999) for i in range(0, 400000, 15000)]
+    price_brackets.append((400000, 5000000))
+
+    for p_min, p_max in price_brackets:
+        if custom_url and "otomoto.pl" in custom_url:
+            clean_url = custom_url.split('&page=')[0].split('?page=')[0]
+            separator = "&" if "?" in clean_url else "?"
+            url = f"{clean_url}{separator}search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
+        else:
+            url = f"https://www.otomoto.pl/{cat_slug}/{b_slug}/{m_slug}/od-{year_from}?search%5Bfilter_float_year%3Ato%5D={year_to}&search%5Bfilter_float_price%3Afrom%5D={p_min}&search%5Bfilter_float_price%3Ato%5D={p_max}"
+
+        try:
+            time.sleep(random.uniform(0.3, 0.6))
+            resp = session.get(url, timeout=10)
+            if resp.status_code != 200:
+                continue
+        except:
+            continue
+
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        articles = soup.find_all('article')
+        
+        if not articles:
+            continue
+
+        for art in articles:
+            oid = art.get('id') or art.get('data-id')
+            if not oid or oid in processed_this_run:
+                continue
+
+            raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
+            text_lower = raw_text.lower()
+
+            title_elem = art.find('h1') or art.find('h2') or art.find('h6')
+            title = title_elem.text.strip() if title_elem else f"{brand} {model}"
+
+            # Cena
+            price = 0.0
+            p_matches = re.findall(r'(\d{1,3}(?:[ \.]\d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
+            if p_matches:
+                vals = [float(p[0].replace(' ', '').replace('.', '')) for p in p_matches]
+                valid_vals = [v for v in vals if 3000 < v < 5000000]
+                if valid_vals:
+                    price = max(valid_vals)
+
+            if price == 0:
+                continue
+
+            # Rocznik
+            year = None
+            for tag in art.find_all(['li', 'dd', 'span', 'p', 'div']):
+                t_str = tag.text.strip()
+                if 'cm' in t_str.lower() or 'pln' in t_str.lower() or 'km' in t_str.lower():
+                    continue
+                y_match = re.search(r'\b(19\d{2}|20\d{2})\b', t_str)
+                if y_match:
+                    y_val = int(y_match.group(1))
+                    if int(year_from) <= y_val <= int(year_to):
+                        year = y_val
+                        break
+
+            if not year:
+                year = int(year_from)
+
+            # Przebieg
+            mileage = 0
+            m_matches = re.findall(r'\b(\d{1,3}(?:[ \.]\d{3})*|\d+)\s*km\b', text_lower)
+            if m_matches:
+                m_vals = [int(m.replace(' ', '').replace('.', '')) for m in m_matches]
+                valid_m = [m for m in m_vals if 0 < m < 1500000]
+                if valid_m:
+                    mileage = max(valid_m)
+
+            a_elem = art.find('a', href=True)
+            offer_url = a_elem['href'] if a_elem else ""
+
+            processed_this_run.add(oid)
+
+            cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (oid,))
+            row = cursor.fetchone()
             
-            st.divider()
-            
-            if active_year_raw.empty:
-                st.info("Brak aktywnych ofert dla tego rocznika.")
+            if row:
+                offer_db_id, old_price = row
+                if old_price != price:
+                    cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
+                cursor.execute("""
+                    UPDATE offers 
+                    SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ? 
+                    WHERE id = ?
+                """, (price, mileage, now_time_str, offer_db_id))
+                updates += 1
             else:
-                disp_df = active_year_raw[['otomoto_id', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
-                disp_df.rename(columns={'otomoto_id': 'ID Oferty'}, inplace=True)
+                cursor.execute('''
+                    INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?)
+                ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, now_time_str, now_time_str))
                 
-                disp_df['Cena (PLN)'] = disp_df['Cena (PLN)'].apply(lambda x: f"{int(x):,} PLN".replace(",", " ") if x > 0 else "Brak ceny")
-                disp_df['Przebieg (km)'] = disp_df['Przebieg (km)'].apply(lambda x: f"{int(x):,} km".replace(",", " ") if x > 0 else "Brak danych")
-                
-                st.table(disp_df)
+                new_id = cursor.lastrowid
+                cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
+                new_inserts += 1
 
-    with tabs[-1]:
-        st.subheader("Wszystkie oferty – Filtrowanie i Sortowanie")
-        
-        col_f1, col_f2 = st.columns(2)
-        status_filter = col_f1.multiselect("Filtruj po statusie:", options=['Aktywne', 'Zmieniono cenę', 'Sprzedane'], default=['Aktywne', 'Zmieniono cenę', 'Sprzedane'])
-        search_query = col_f2.text_input("Szukaj w tytule oferty:", "")
+    # Oznaczanie sprzedanych
+    limit_time = (now_time - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        UPDATE offers 
+        SET status = 'Sprzedane' 
+        WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) 
+          AND production_year BETWEEN ? AND ? AND last_seen_at < ?
+    ''', (brand.strip().lower(), model.strip().lower(), year_from, year_to, limit_time))
 
-        filtered_df = df[df['Dynamic_Status'].isin(status_filter)]
-        if search_query:
-            filtered_df = filtered_df[filtered_df['Oferta'].str.contains(search_query, case=False, na=False)]
+    cursor.execute('''
+        SELECT COUNT(*) FROM offers 
+        WHERE LOWER(brand) = LOWER(?) AND LOWER(model) = LOWER(?) 
+          AND production_year BETWEEN ? AND ? AND status = 'Aktywne'
+    ''', (brand.strip().lower(), model.strip().lower(), year_from, year_to))
+    active_in_db = cursor.fetchone()[0]
 
-        hist_disp = filtered_df[['otomoto_id', 'Rocznik', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Dynamic_Status', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
-        hist_disp.rename(columns={'otomoto_id': 'ID Oferty', 'Dynamic_Status': 'Status'}, inplace=True)
-        
-        hist_disp['Cena (PLN)'] = hist_disp['Cena (PLN)'].apply(lambda x: f"{int(x):,} PLN".replace(",", " ") if x > 0 else "Brak ceny")
-        hist_disp['Przebieg (km)'] = hist_disp['Przebieg (km)'].apply(lambda x: f"{int(x):,} km".replace(",", " ") if x > 0 else "Brak danych")
+    conn.commit()
+    conn.close()
 
-        def highlight_all(row):
-            status = row['Status']
-            if status == 'Sprzedane':
-                return ['background-color: rgba(255, 60, 60, 0.2); color: #ff6666;'] * len(row)
-            elif status == 'Zmieniono cenę':
-                return ['background-color: rgba(255, 204, 0, 0.2); color: #ffcc00;'] * len(row)
-            return [''] * len(row)
-
-        styled_hist = hist_disp.style.apply(highlight_all, axis=1)
-        st.dataframe(styled_hist, use_container_width=True)
+    total_processed = new_inserts + updates
+    return f"✅ Sukces! Metoda mikro-koszyków pobrała: {total_processed} unikalnych ofert (Nowych: {new_inserts}, Aktualizacji: {updates}). Aktywnych w bazie: {active_in_db} szt."
