@@ -151,3 +151,5 @@ else:
 
         styled_hist = hist_disp.style.apply(highlight_all, axis=1)
         st.dataframe(styled_hist, use_container_width=True)
+
+
