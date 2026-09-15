@@ -79,6 +79,10 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     updates = 0
     processed_this_run = set()
 
+    diag_total_articles = 0
+    diag_rejected_price = 0
+    diag_rejected_year = 0
+
     cat_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
     b_slug, m_slug = build_otomoto_slugs(brand, model)
 
@@ -130,6 +134,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                     continue
 
                 found_new_on_page = True
+                diag_total_articles += 1
 
                 raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
                 text_lower = raw_text.lower()
@@ -144,22 +149,23 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                         price = max(valid_vals)
 
                 if price == 0:
+                    diag_rejected_price += 1
                     continue
 
-                # Rocznik
+                # Rocznik: szukamy WSZYSTKICH 4-cyfrowych lat w całym tekście ogłoszenia,
+                # zamiast odrzucać całe fragmenty tekstu tylko dlatego, że sąsiadują
+                # ze słowami "km"/"cm"/"pln" (to właśnie gubiło większość ofert -
+                # rocznik często siedzi w tym samym elemencie co przebieg/pojemność).
                 year = None
-                for tag in art.find_all(['li', 'dd', 'span', 'p', 'div']):
-                    t_str = tag.text.strip().lower()
-                    if 'cm' in t_str or 'pln' in t_str or 'km' in t_str:
-                        continue
-                    y_match = re.search(r'\b(19\d{2}|20\d{2})\b', t_str)
-                    if y_match:
-                        y_val = int(y_match.group(1))
-                        if int(year_from) <= y_val <= int(year_to):
-                            year = y_val
-                            break
+                y_candidates = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
+                for y_str in y_candidates:
+                    y_val = int(y_str)
+                    if int(year_from) <= y_val <= int(year_to):
+                        year = y_val
+                        break
 
                 if not year:
+                    diag_rejected_year += 1
                     continue
 
                 # Przebieg
@@ -229,4 +235,8 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     conn.close()
 
     total_processed = new_inserts + updates
-    return f"OSTATECZNA PRÓBA: Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} aut."
+    return (
+        f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} aut. "
+        f"[DIAGNOSTYKA: znalezionych artykułów={diag_total_articles}, "
+        f"odrzuconych przez cenę={diag_rejected_price}, odrzuconych przez rocznik={diag_rejected_year}]"
+    )
