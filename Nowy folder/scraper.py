@@ -82,6 +82,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     diag_total_articles = 0
     diag_rejected_price = 0
     diag_rejected_year = 0
+    diag_rejected_model_mismatch = 0
 
     cat_slug = "motocykle-i-quady" if category == "Motocykle" else "osobowe"
     b_slug, m_slug = build_otomoto_slugs(brand, model)
@@ -123,6 +124,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 break
 
             found_new_on_page = False
+            plausible_match_this_page = False
 
             for art in articles:
                 oid = art.get('id') or art.get('data-id')
@@ -138,6 +140,17 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
 
                 raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
                 text_lower = raw_text.lower()
+
+                # Sanity-check: Otomoto potrafi dokładać do wyników "podobne oferty" / rekomendacje
+                # (inne modele, czasem inne marki) w tych samych znacznikach <article>, zwłaszcza
+                # gdy w danym koszyku cenowym jest mało prawdziwych trafień. Jeśli tekst ogłoszenia
+                # w ogóle nie wspomina szukanego modelu, to prawie na pewno nie jest to nasza oferta.
+                model_tokens = [t for t in model.strip().lower().split() if len(t) > 1]
+                if model_tokens and not any(tok in text_lower for tok in model_tokens):
+                    diag_rejected_model_mismatch += 1
+                    continue
+
+                plausible_match_this_page = True
 
                 # Cena
                 price = 0.0
@@ -208,9 +221,10 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                     cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
                     new_inserts += 1
 
-            # Jeśli strona nie wniosła ANI JEDNEGO nowego ogłoszenia (wszystko duplikaty)
-            # to prawdopodobnie dotarliśmy do końca / pętli po stronach - przerywamy dla tego koszyka.
-            if not found_new_on_page:
+            # Jeśli strona nie dała ANI JEDNEGO ogłoszenia pasującego do modelu - to prawdopodobnie
+            # weszliśmy w strefę rekomendacji/podobnych ofert Otomoto, a nie kolejną stronę realnych
+            # wyników. Przerywamy dla tego koszyka, żeby nie zbierać śmieciowych danych.
+            if not plausible_match_this_page:
                 break
 
             page += 1
@@ -238,5 +252,6 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     return (
         f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} aut. "
         f"[DIAGNOSTYKA: znalezionych artykułów={diag_total_articles}, "
+        f"niezgodnych z modelem={diag_rejected_model_mismatch}, "
         f"odrzuconych przez cenę={diag_rejected_price}, odrzuconych przez rocznik={diag_rejected_year}]"
     )
