@@ -138,63 +138,72 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 found_new_on_page = True
                 diag_total_articles += 1
 
-                raw_text = art.get_text(" ", strip=True).replace('\xa0', ' ').replace('\u202f', ' ')
-                text_lower = raw_text.lower()
+                # Tytuł ogłoszenia siedzi w <a aria-label="..."> - to też najbardziej
+                # wiarygodne miejsce do weryfikacji, czy oferta faktycznie dotyczy
+                # szukanego modelu (a nie np. dealera/rekomendacji w tym samym <article>).
+                title_link = art.find('a', attrs={'aria-label': True})
+                title_text = title_link.get('aria-label', '').strip() if title_link else ""
+                if not title_text:
+                    title_text = f"{brand} {model}"
+                title_lower = title_text.lower()
 
-                # Sanity-check: Otomoto potrafi dokładać do wyników "podobne oferty" / rekomendacje
-                # (inne modele, czasem inne marki) w tych samych znacznikach <article>, zwłaszcza
-                # gdy w danym koszyku cenowym jest mało prawdziwych trafień. Jeśli tekst ogłoszenia
-                # w ogóle nie wspomina szukanego modelu, to prawie na pewno nie jest to nasza oferta.
                 model_tokens = [t for t in model.strip().lower().split() if len(t) > 1]
-                if model_tokens and not any(tok in text_lower for tok in model_tokens):
+                if model_tokens and not any(tok in title_lower for tok in model_tokens):
                     diag_rejected_model_mismatch += 1
                     continue
 
                 plausible_match_this_page = True
 
-                # Cena
+                # Cena: siedzi w <h3><span translate="no">104 900</span></h3>. Uwaga: obok może
+                # być przekreślona "cena przed obniżką" w <del> - nie bierzemy jej pod uwagę,
+                # bo szukamy konkretnie <h3>, nie <del>.
                 price = 0.0
-                p_matches = re.findall(r'(\d{1,3}(?:[ \.]\d{3})*|\d{4,7})\s*(PLN|EUR|zł|zl)', raw_text, re.IGNORECASE)
-                if p_matches:
-                    vals = [float(p[0].replace(' ', '').replace('.', '')) for p in p_matches]
-                    valid_vals = [v for v in vals if 3000 < v < 5000000]
-                    if valid_vals:
-                        price = max(valid_vals)
+                price_h3 = art.find('h3')
+                if price_h3:
+                    price_span = price_h3.find('span')
+                    price_raw = (price_span.get_text(strip=True) if price_span
+                                 else price_h3.get_text(strip=True))
+                    price_digits = re.sub(r'\D', '', price_raw)
+                    if price_digits:
+                        try:
+                            price = float(price_digits)
+                        except ValueError:
+                            price = 0.0
 
-                if price == 0:
+                if not (3000 < price < 5000000):
                     diag_rejected_price += 1
                     continue
 
-                # Rocznik: szukamy WSZYSTKICH 4-cyfrowych lat w całym tekście ogłoszenia,
-                # zamiast odrzucać całe fragmenty tekstu tylko dlatego, że sąsiadują
-                # ze słowami "km"/"cm"/"pln" (to właśnie gubiło większość ofert -
-                # rocznik często siedzi w tym samym elemencie co przebieg/pojemność).
+                # Rocznik: precyzyjnie z <dd data-parameter="year">2022</dd>, a nie zgadywanie
+                # z całego tekstu (gdzie łatwo pomylić rok z pojemnością silnika typu "1991 cm3").
                 year = None
-                y_candidates = re.findall(r'\b(19\d{2}|20\d{2})\b', raw_text)
-                for y_str in y_candidates:
-                    y_val = int(y_str)
-                    if int(year_from) <= y_val <= int(year_to):
-                        year = y_val
-                        break
+                year_dd = art.find('dd', attrs={'data-parameter': 'year'})
+                if year_dd:
+                    y_match = re.search(r'(19\d{2}|20\d{2})', year_dd.get_text(strip=True))
+                    if y_match:
+                        y_val = int(y_match.group(1))
+                        if int(year_from) <= y_val <= int(year_to):
+                            year = y_val
 
                 if not year:
                     diag_rejected_year += 1
                     continue
 
-                # Przebieg
+                # Przebieg: z <dd data-parameter="mileage">...70 001 km</dd>
                 mileage = 0
-                m_matches = re.findall(r'\b(\d{1,3}(?:[ \.]\d{3})*|\d+)\s*km\b', text_lower)
-                if m_matches:
-                    m_vals = [int(m.replace(' ', '').replace('.', '')) for m in m_matches]
-                    valid_m = [m for m in m_vals if 0 < m < 1500000]
-                    if valid_m:
-                        mileage = max(valid_m)
+                mileage_dd = art.find('dd', attrs={'data-parameter': 'mileage'})
+                if mileage_dd:
+                    mileage_digits = re.sub(r'\D', '', mileage_dd.get_text(strip=True))
+                    if mileage_digits:
+                        try:
+                            mileage_val = int(mileage_digits)
+                            if 0 < mileage_val < 1500000:
+                                mileage = mileage_val
+                        except ValueError:
+                            mileage = 0
 
-                title_elem = art.find('h1') or art.find('h2') or art.find('h6')
-                title = title_elem.text.strip() if title_elem else f"{brand} {model}"
-
-                a_elem = art.find('a', href=True)
-                offer_url = a_elem['href'] if a_elem else ""
+                title = title_text
+                offer_url = title_link['href'] if title_link and title_link.has_attr('href') else ""
 
                 processed_this_run.add(oid)
 
