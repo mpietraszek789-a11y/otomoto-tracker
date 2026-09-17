@@ -248,35 +248,44 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
 
                 processed_this_run.add(oid)
 
-                # Zapis do bazy
-                cursor.execute("SELECT id, current_price, country_origin FROM offers WHERE otomoto_id = ?", (oid,))
-                row = cursor.fetchone()
+                # Zapis do bazy - UPSERT (INSERT ... ON CONFLICT DO UPDATE) zamiast
+                # osobnego SELECT+INSERT/UPDATE, żeby nie było możliwości naruszenia
+                # unikalności otomoto_id nawet przy równoległych odświeżeniach (np.
+                # Streamlit uruchamiający skrypt ponownie w trakcie działania).
+                cursor.execute("SELECT current_price, country_origin FROM offers WHERE otomoto_id = ?", (oid,))
+                existing = cursor.fetchone()
 
-                if row:
-                    offer_db_id, old_price, existing_country = row
+                if existing:
+                    old_price, existing_country = existing
                     country_origin = existing_country
                     if not existing_country:
-                        # Nie mamy jeszcze kraju dla tej oferty - dociągamy raz i zapisujemy na stałe
                         country_origin = fetch_country_origin(session, offer_url)
                         time.sleep(random.uniform(0.3, 0.6))
-                    if old_price != price:
-                        cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
-                    cursor.execute("""
-                        UPDATE offers
-                        SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ?, country_origin = ?
-                        WHERE id = ?
-                    """, (price, mileage, now_time_str, country_origin, offer_db_id))
+                    price_changed = (old_price != price)
                     updates += 1
                 else:
+                    old_price = None
                     country_origin = fetch_country_origin(session, offer_url)
                     time.sleep(random.uniform(0.3, 0.6))
-                    cursor.execute('''
-                        INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, country_origin, first_seen_at, last_seen_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?, ?)
-                    ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, country_origin, now_time_str, now_time_str))
-                    new_id = cursor.lastrowid
-                    cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
+                    price_changed = True
                     new_inserts += 1
+
+                cursor.execute('''
+                    INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, country_origin, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?, ?)
+                    ON CONFLICT(otomoto_id) DO UPDATE SET
+                        current_price = excluded.current_price,
+                        mileage_km = excluded.mileage_km,
+                        status = 'Aktywne',
+                        last_seen_at = excluded.last_seen_at,
+                        country_origin = excluded.country_origin
+                ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, country_origin, now_time_str, now_time_str))
+
+                cursor.execute("SELECT id FROM offers WHERE otomoto_id = ?", (oid,))
+                offer_db_id = cursor.fetchone()[0]
+
+                if price_changed:
+                    cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
 
             # Jeśli strona nie dała ANI JEDNEGO ogłoszenia pasującego do modelu - to prawdopodobnie
             # weszliśmy w strefę rekomendacji/podobnych ofert Otomoto, a nie kolejną stronę realnych
