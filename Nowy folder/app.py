@@ -56,9 +56,9 @@ USA_COUNTRY_LABELS = {"usa", "stany zjednoczone", "us", "united states", "stany 
 
 
 def is_usa_origin(country):
-    if not country:
+    if pd.isna(country):
         return False
-    return country.strip().lower() in USA_COUNTRY_LABELS
+    return str(country).strip().lower() in USA_COUNTRY_LABELS
 
 
 def format_price(x):
@@ -70,7 +70,7 @@ def format_mileage(x):
 
 
 def format_country(x):
-    if not x:
+    if pd.isna(x):
         return "Nieznany"
     return f"🇺🇸 {x} (wykluczone ze średniej)" if is_usa_origin(x) else x
 
