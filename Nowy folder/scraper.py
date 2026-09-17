@@ -13,6 +13,15 @@ def get_connection():
     return sqlite3.connect('otomoto.db')
 
 
+def ensure_country_column(cursor):
+    """Dodaje kolumnę country_origin, jeśli jej jeszcze nie ma - sprawdzone wprost
+    przez PRAGMA, a nie przez łapanie wyjątku (bardziej niezawodne między środowiskami)."""
+    cursor.execute("PRAGMA table_info(offers)")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    if 'country_origin' not in existing_cols:
+        cursor.execute("ALTER TABLE offers ADD COLUMN country_origin TEXT")
+
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -34,11 +43,7 @@ def init_db():
             last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Migracja dla baz założonych zanim doszła kolumna country_origin
-    try:
-        cursor.execute("ALTER TABLE offers ADD COLUMN country_origin TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
+    ensure_country_column(cursor)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +104,8 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
+    ensure_country_column(cursor)
+    conn.commit()
 
     session = requests.Session()
     session.headers.update({
