@@ -29,10 +29,16 @@ def init_db():
             url TEXT NOT NULL,
             status TEXT DEFAULT 'Aktywne',
             publication_date TEXT,
+            country_origin TEXT,
             first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # Migracja dla baz założonych zanim doszła kolumna country_origin
+    try:
+        cursor.execute("ALTER TABLE offers ADD COLUMN country_origin TEXT")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +50,34 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+
+
+def fetch_country_origin(session, offer_url):
+    """
+    Wchodzi na stronę pojedynczej oferty i wyciąga 'Kraj pochodzenia' ze specyfikacji.
+    To pole nie jest dostępne na liście wyników, tylko na stronie szczegółowej -
+    stąd dodatkowe zapytanie. Zwraca None, jeśli nie uda się znaleźć (np. sprzedający
+    nie wypełnił tego pola).
+    """
+    if not offer_url:
+        return None
+    try:
+        resp = session.get(offer_url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # Etykieta "Kraj pochodzenia" i wartość (np. "Polska") to sąsiadujące <p>,
+        # więc szukamy po tekście etykiety, niezależnie od losowych nazw klas CSS.
+        label = soup.find(lambda tag: tag.name == 'p' and tag.get_text(strip=True) == 'Kraj pochodzenia')
+        if not label:
+            return None
+        value_tag = label.find_next('p')
+        if not value_tag:
+            return None
+        value = value_tag.get_text(strip=True)
+        return value if value else None
+    except Exception:
+        return None
 
 
 def build_otomoto_slugs(brand, model):
@@ -208,24 +242,31 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 processed_this_run.add(oid)
 
                 # Zapis do bazy
-                cursor.execute("SELECT id, current_price FROM offers WHERE otomoto_id = ?", (oid,))
+                cursor.execute("SELECT id, current_price, country_origin FROM offers WHERE otomoto_id = ?", (oid,))
                 row = cursor.fetchone()
 
                 if row:
-                    offer_db_id, old_price = row
+                    offer_db_id, old_price, existing_country = row
+                    country_origin = existing_country
+                    if not existing_country:
+                        # Nie mamy jeszcze kraju dla tej oferty - dociągamy raz i zapisujemy na stałe
+                        country_origin = fetch_country_origin(session, offer_url)
+                        time.sleep(random.uniform(0.3, 0.6))
                     if old_price != price:
                         cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
                     cursor.execute("""
                         UPDATE offers
-                        SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ?
+                        SET current_price = ?, mileage_km = ?, status = 'Aktywne', last_seen_at = ?, country_origin = ?
                         WHERE id = ?
-                    """, (price, mileage, now_time_str, offer_db_id))
+                    """, (price, mileage, now_time_str, country_origin, offer_db_id))
                     updates += 1
                 else:
+                    country_origin = fetch_country_origin(session, offer_url)
+                    time.sleep(random.uniform(0.3, 0.6))
                     cursor.execute('''
-                        INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, first_seen_at, last_seen_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?)
-                    ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, now_time_str, now_time_str))
+                        INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, country_origin, first_seen_at, last_seen_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?, ?)
+                    ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, country_origin, now_time_str, now_time_str))
                     new_id = cursor.lastrowid
                     cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (new_id, price))
                     new_inserts += 1
