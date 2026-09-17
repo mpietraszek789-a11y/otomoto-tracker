@@ -26,13 +26,24 @@ year_from = col1.number_input("Rocznik Od", 1990, 2026, 2022)
 year_to = col2.number_input("Rocznik Do", 1990, 2026, 2022)
 
 st.sidebar.markdown("---")
+col3, col4 = st.sidebar.columns(2)
+engine_capacity_from = col3.number_input("Silnik Od (cm3)", 0, 10000, 0, step=100)
+engine_capacity_to = col4.number_input("Silnik Do (cm3)", 0, 10000, 0, step=100)
+accident_filter = st.sidebar.selectbox("Stan uszkodzeń", ["Dowolny", "Tylko bezwypadkowe", "Tylko uszkodzone"])
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("🔗 Alternatywa: Gotowy link")
 st.sidebar.caption("Jeśli masz specyficzne filtry, wklej tu pełny link z przeglądarki.")
 custom_url = st.sidebar.text_input("Wklej gotowy link z Otomoto:")
 
 if st.sidebar.button("Pobierz / Odśwież dane z Otomoto", type="primary"):
     with st.spinner("Pobieram oferty metodą mikro-koszyków... To potrwa chwilę."):
-        msg = scrape_and_update(category, brand, model, int(year_from), int(year_to), custom_url)
+        msg = scrape_and_update(
+            category, brand, model, int(year_from), int(year_to), custom_url,
+            engine_capacity_from=int(engine_capacity_from) if engine_capacity_from else None,
+            engine_capacity_to=int(engine_capacity_to) if engine_capacity_to else None,
+            accident_filter=accident_filter,
+        )
     st.sidebar.success(msg)
 
 st.sidebar.markdown("---")
@@ -75,6 +86,16 @@ def format_country(x):
     return f"🇺🇸 {x} (wykluczone ze średniej)" if is_usa_origin(x) else x
 
 
+def format_capacity(x):
+    return f"{int(x)} cm3" if pd.notna(x) and x and x > 0 else "Brak danych"
+
+
+def format_accident(x):
+    if pd.isna(x) or not x:
+        return "Brak danych"
+    return x
+
+
 def make_row_highlighter(numeric_price_series, country_series, threshold, price_col_name, country_col_name):
     """Zwraca funkcję do Styler.apply(axis=1):
     - koloruje cenę na zielono, jeśli jest min. 20% poniżej średniej (bez USA),
@@ -107,6 +128,8 @@ try:
         SELECT id, otomoto_id, production_year as Rocznik, title as Oferta,
                current_price as "Cena (PLN)", mileage_km as "Przebieg (km)",
                country_origin as "Kraj pochodzenia",
+               engine_capacity as "Pojemność (cm3)",
+               accident_free as "Bezwypadkowy",
                status as Status, publication_date as "Data publikacji",
                last_seen_at as "Ostatnia aktualizacja", url as Link
         FROM offers
@@ -171,7 +194,7 @@ else:
             if active_year_raw.empty:
                 st.info("Brak aktywnych ofert dla tego rocznika.")
             else:
-                disp_df = active_year_raw[['otomoto_id', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Kraj pochodzenia', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
+                disp_df = active_year_raw[['otomoto_id', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Kraj pochodzenia', 'Pojemność (cm3)', 'Bezwypadkowy', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
                 disp_df.rename(columns={'otomoto_id': 'ID Oferty'}, inplace=True)
 
                 numeric_price = disp_df['Cena (PLN)'].copy()
@@ -180,6 +203,8 @@ else:
                 disp_df['Cena (PLN)'] = disp_df['Cena (PLN)'].apply(format_price)
                 disp_df['Przebieg (km)'] = disp_df['Przebieg (km)'].apply(format_mileage)
                 disp_df['Kraj pochodzenia'] = disp_df['Kraj pochodzenia'].apply(format_country)
+                disp_df['Pojemność (cm3)'] = disp_df['Pojemność (cm3)'].apply(format_capacity)
+                disp_df['Bezwypadkowy'] = disp_df['Bezwypadkowy'].apply(format_accident)
 
                 highlighter = make_row_highlighter(numeric_price, country_raw, price_threshold, 'Cena (PLN)', 'Kraj pochodzenia')
                 styled = disp_df.style.apply(highlighter, axis=1)
@@ -195,13 +220,15 @@ else:
         if search_query:
             filtered_df = filtered_df[filtered_df['Oferta'].str.contains(search_query, case=False, na=False)]
 
-        hist_disp = filtered_df[['otomoto_id', 'Rocznik', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Kraj pochodzenia', 'Dynamic_Status', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
+        hist_disp = filtered_df[['otomoto_id', 'Rocznik', 'Oferta', 'Cena (PLN)', 'Przebieg (km)', 'Kraj pochodzenia', 'Pojemność (cm3)', 'Bezwypadkowy', 'Dynamic_Status', 'Data publikacji', 'Ostatnia aktualizacja', 'Link']].copy()
         hist_disp.rename(columns={'otomoto_id': 'ID Oferty', 'Dynamic_Status': 'Status'}, inplace=True)
         hist_country_raw = filtered_df['Kraj pochodzenia'].copy()
 
         hist_disp['Cena (PLN)'] = hist_disp['Cena (PLN)'].apply(format_price)
         hist_disp['Przebieg (km)'] = hist_disp['Przebieg (km)'].apply(format_mileage)
         hist_disp['Kraj pochodzenia'] = hist_disp['Kraj pochodzenia'].apply(format_country)
+        hist_disp['Pojemność (cm3)'] = hist_disp['Pojemność (cm3)'].apply(format_capacity)
+        hist_disp['Bezwypadkowy'] = hist_disp['Bezwypadkowy'].apply(format_accident)
 
         def highlight_all(row):
             status = row['Status']
