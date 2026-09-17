@@ -18,13 +18,18 @@ def get_connection():
     return conn
 
 
-def ensure_country_column(cursor):
-    """Dodaje kolumnę country_origin, jeśli jej jeszcze nie ma - sprawdzone wprost
-    przez PRAGMA, a nie przez łapanie wyjątku (bardziej niezawodne między środowiskami)."""
+def ensure_extra_columns(cursor):
+    """Dodaje kolumny country_origin, engine_capacity i accident_free, jeśli ich
+    jeszcze nie ma - sprawdzone wprost przez PRAGMA, a nie przez łapanie wyjątku
+    (bardziej niezawodne między środowiskami)."""
     cursor.execute("PRAGMA table_info(offers)")
     existing_cols = [row[1] for row in cursor.fetchall()]
     if 'country_origin' not in existing_cols:
         cursor.execute("ALTER TABLE offers ADD COLUMN country_origin TEXT")
+    if 'engine_capacity' not in existing_cols:
+        cursor.execute("ALTER TABLE offers ADD COLUMN engine_capacity INTEGER")
+    if 'accident_free' not in existing_cols:
+        cursor.execute("ALTER TABLE offers ADD COLUMN accident_free TEXT")
 
 
 def init_db():
@@ -44,11 +49,13 @@ def init_db():
             status TEXT DEFAULT 'Aktywne',
             publication_date TEXT,
             country_origin TEXT,
+            engine_capacity INTEGER,
+            accident_free TEXT,
             first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    ensure_country_column(cursor)
+    ensure_extra_columns(cursor)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,32 +69,36 @@ def init_db():
     conn.close()
 
 
-def fetch_country_origin(session, offer_url):
+def fetch_offer_details(session, offer_url):
     """
-    Wchodzi na stronę pojedynczej oferty i wyciąga 'Kraj pochodzenia' ze specyfikacji.
-    To pole nie jest dostępne na liście wyników, tylko na stronie szczegółowej -
-    stąd dodatkowe zapytanie. Zwraca None, jeśli nie uda się znaleźć (np. sprzedający
-    nie wypełnił tego pola).
+    Wchodzi na stronę pojedynczej oferty i wyciąga 'Kraj pochodzenia' oraz 'Bezwypadkowy'
+    ze specyfikacji - oba na raz, jednym zapytaniem (te pola nie są dostępne na liście
+    wyników). Zwraca (kraj, bezwypadkowy) - każde może być None, jeśli sprzedający
+    nie wypełnił danego pola.
     """
     if not offer_url:
-        return None
+        return None, None
     try:
         resp = session.get(offer_url, timeout=10)
         if resp.status_code != 200:
-            return None
+            return None, None
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # Etykieta "Kraj pochodzenia" i wartość (np. "Polska") to sąsiadujące <p>,
-        # więc szukamy po tekście etykiety, niezależnie od losowych nazw klas CSS.
-        label = soup.find(lambda tag: tag.name == 'p' and tag.get_text(strip=True) == 'Kraj pochodzenia')
-        if not label:
-            return None
-        value_tag = label.find_next('p')
-        if not value_tag:
-            return None
-        value = value_tag.get_text(strip=True)
-        return value if value else None
+
+        def value_after_label(label_text):
+            label = soup.find(lambda tag: tag.name == 'p' and tag.get_text(strip=True) == label_text)
+            if not label:
+                return None
+            value_tag = label.find_next('p')
+            if not value_tag:
+                return None
+            value = value_tag.get_text(strip=True)
+            return value if value else None
+
+        country = value_after_label('Kraj pochodzenia')
+        accident_free = value_after_label('Bezwypadkowy')
+        return country, accident_free
     except Exception:
-        return None
+        return None, None
 
 
 def build_otomoto_slugs(brand, model):
@@ -105,11 +116,12 @@ def build_otomoto_slugs(brand, model):
     return b, m
 
 
-def scrape_and_update(category, brand, model, year_from, year_to, custom_url=""):
+def scrape_and_update(category, brand, model, year_from, year_to, custom_url="",
+                       engine_capacity_from=None, engine_capacity_to=None, accident_filter="Dowolny"):
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    ensure_country_column(cursor)
+    ensure_extra_columns(cursor)
     conn.commit()
 
     session = requests.Session()
@@ -138,6 +150,14 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
     base_params = {
         "search[filter_float_year:to]": year_to
     }
+    if engine_capacity_from:
+        base_params["search[filter_float_engine_capacity:from]"] = engine_capacity_from
+    if engine_capacity_to:
+        base_params["search[filter_float_engine_capacity:to]"] = engine_capacity_to
+    if accident_filter == "Tylko bezwypadkowe":
+        base_params["search[filter_enum_no_accident]"] = 1
+    elif accident_filter == "Tylko uszkodzone":
+        base_params["search[filter_enum_damaged]"] = 1
 
     # Koszyki cenowe (wymuszają pokazanie innych aut bez potrzeby paginacji po całym zakresie cen)
     price_brackets = [(i, i + 19999) for i in range(0, 300000, 20000)]
@@ -251,40 +271,65 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
                 title = title_text
                 offer_url = title_link['href'] if title_link and title_link.has_attr('href') else ""
 
+                # Pojemność silnika: dla motocykli jest wprost w dd[data-parameter="engine_capacity"].
+                # Dla samochodów osobowych ten dd zwykle nie występuje - tam pojemność bywa
+                # w podtytule oferty jako np. "1984 cm3", więc to bezpieczny fallback
+                # (jednostka "cm3" jest wystarczająco specyficzna, żeby nie pomylić jej z niczym innym).
+                engine_capacity = None
+                capacity_dd = art.find('dd', attrs={'data-parameter': 'engine_capacity'})
+                if capacity_dd:
+                    capacity_digits = re.sub(r'\D', '', capacity_dd.get_text(strip=True))
+                    if capacity_digits:
+                        try:
+                            engine_capacity = int(capacity_digits)
+                        except ValueError:
+                            engine_capacity = None
+                if engine_capacity is None:
+                    cm3_match = re.search(r'([\d\s]{3,6})\s*cm3', art.get_text(" ", strip=True))
+                    if cm3_match:
+                        digits = re.sub(r'\D', '', cm3_match.group(1))
+                        if digits:
+                            try:
+                                engine_capacity = int(digits)
+                            except ValueError:
+                                engine_capacity = None
+
                 processed_this_run.add(oid)
 
                 # Zapis do bazy - UPSERT (INSERT ... ON CONFLICT DO UPDATE) zamiast
                 # osobnego SELECT+INSERT/UPDATE, żeby nie było możliwości naruszenia
                 # unikalności otomoto_id nawet przy równoległych odświeżeniach (np.
                 # Streamlit uruchamiający skrypt ponownie w trakcie działania).
-                cursor.execute("SELECT current_price, country_origin FROM offers WHERE otomoto_id = ?", (oid,))
+                cursor.execute("SELECT current_price, country_origin, accident_free FROM offers WHERE otomoto_id = ?", (oid,))
                 existing = cursor.fetchone()
 
                 if existing:
-                    old_price, existing_country = existing
-                    country_origin = existing_country
+                    old_price, existing_country, existing_accident = existing
+                    country_origin, accident_free = existing_country, existing_accident
                     if not existing_country:
-                        country_origin = fetch_country_origin(session, offer_url)
+                        country_origin, accident_free = fetch_offer_details(session, offer_url)
                         time.sleep(random.uniform(0.3, 0.6))
                     price_changed = (old_price != price)
                     updates += 1
                 else:
                     old_price = None
-                    country_origin = fetch_country_origin(session, offer_url)
+                    country_origin, accident_free = fetch_offer_details(session, offer_url)
                     time.sleep(random.uniform(0.3, 0.6))
                     price_changed = True
                     new_inserts += 1
 
                 cursor.execute('''
-                    INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, country_origin, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?, ?)
+                    INSERT INTO offers (otomoto_id, brand, model, production_year, title, mileage_km, current_price, url, status, publication_date, country_origin, engine_capacity, accident_free, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Aktywne', 'Brak danych', ?, ?, ?, ?, ?)
                     ON CONFLICT(otomoto_id) DO UPDATE SET
                         current_price = excluded.current_price,
                         mileage_km = excluded.mileage_km,
                         status = 'Aktywne',
                         last_seen_at = excluded.last_seen_at,
-                        country_origin = excluded.country_origin
-                ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, country_origin, now_time_str, now_time_str))
+                        country_origin = excluded.country_origin,
+                        engine_capacity = excluded.engine_capacity,
+                        accident_free = excluded.accident_free
+                ''', (oid, brand.strip(), model.strip(), year, title, mileage, price, offer_url, country_origin, engine_capacity, accident_free, now_time_str, now_time_str))
 
                 cursor.execute("SELECT id FROM offers WHERE otomoto_id = ?", (oid,))
                 offer_db_id = cursor.fetchone()[0]
