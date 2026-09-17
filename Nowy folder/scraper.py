@@ -10,7 +10,12 @@ from urllib.parse import urlparse, parse_qsl
 
 
 def get_connection():
-    return sqlite3.connect('otomoto.db')
+    conn = sqlite3.connect('otomoto.db', timeout=30, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
+    return conn
 
 
 def ensure_country_column(cursor):
@@ -286,6 +291,11 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="")
 
                 if price_changed:
                     cursor.execute("INSERT INTO price_history (offer_id, price) VALUES (?, ?)", (offer_db_id, price))
+
+                # Zatwierdzamy od razu po każdej ofercie, żeby transakcja (i ewentualna
+                # blokada bazy) nie trzymała się przez cały czas trwania scrapowania -
+                # to zwłaszcza ważne teraz, gdy dociąganie kraju pochodzenia wydłuża pętlę.
+                conn.commit()
 
             # Jeśli strona nie dała ANI JEDNEGO ogłoszenia pasującego do modelu - to prawdopodobnie
             # weszliśmy w strefę rekomendacji/podobnych ofert Otomoto, a nie kolejną stronę realnych
