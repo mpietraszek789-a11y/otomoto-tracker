@@ -371,7 +371,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="",
 
     total_processed = new_inserts + updates
     return (
-        f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} aut. "
+        f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} ofert. "
         f"[DIAGNOSTYKA: znalezionych artykułów={diag_total_articles}, "
         f"niezgodnych z modelem={diag_rejected_model_mismatch}, "
         f"odrzuconych przez cenę={diag_rejected_price}, odrzuconych przez rocznik={diag_rejected_year}]"
