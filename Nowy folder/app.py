@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from scraper import get_connection, init_db, scrape_and_update
 
-st.set_page_config(page_title="Otomoto Tracker dla Taty", layout="wide")
+st.set_page_config(page_title="Motocyklowy kolektor cen rynkowych", layout="wide")
 
 try:
     init_db()
