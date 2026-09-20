@@ -18,7 +18,7 @@ with col_logo:
         unsafe_allow_html=True
     )
 with col_title:
-    st.title("🏍️ Motocyklowy kolektor cen rynkowych")  # <- wstaw tu SWÓJ dokładny tytuł
+    st.title("Motocyklowy kolektor cen rynkowych")  # <- wstaw tu SWÓJ dokładny tytuł
 
 # Panel boczny
 st.sidebar.header("Kryteria Wyszukiwania")
