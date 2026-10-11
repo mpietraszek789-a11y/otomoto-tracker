@@ -170,21 +170,36 @@ def send_email(subject, html_body):
         print("⚠️ Brak danych do wysyłki maila (EMAIL_SENDER / EMAIL_APP_PASSWORD / EMAIL_RECIPIENT) - pomijam.")
         return False
 
+    # Diagnostyka bez ujawniania sekretów - pozwala wychwycić literówki w sekretach
+    domain = sender.split("@")[-1] if "@" in sender else "BRAK @ W ADRESIE!"
+    print(f"Nadawca: {sender[:2]}***@{domain} | długość hasła aplikacji: {len(password)} (powinno być 16) "
+          f"| liczba odbiorców: {len(recipients)}")
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
-            server.login(sender, password)
-            server.sendmail(sender, recipients, msg.as_string())
-        print(f"📧 Wysłano maila: {subject}")
-        return True
-    except Exception as e:
-        print(f"❌ Nie udało się wysłać maila: {e}")
-        return False
+    # Próbujemy dwóch sposobów połączenia z Gmailem
+    attempts = [("STARTTLS (port 587)", 587, False), ("SSL (port 465)", 465, True)]
+    for name, port, use_ssl in attempts:
+        try:
+            if use_ssl:
+                server = smtplib.SMTP_SSL("smtp.gmail.com", port, timeout=30)
+            else:
+                server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+            with server:
+                server.login(sender, password)
+                server.sendmail(sender, recipients, msg.as_string())
+            print(f"📧 Wysłano maila ({name}): {subject}")
+            return True
+        except Exception as e:
+            print(f"❌ Próba {name} nieudana: {type(e).__name__}: {e}")
+    return False
 
 
 def finalize_db():
@@ -252,6 +267,15 @@ def main():
           <p>Gdy pojawi się oferta min. {int(DISCOUNT * 100)}% poniżej średniej ceny
           (bez ofert z USA), dostaniesz maila.</p></body></html>"""
         send_email("✅ Monitoring ofert uruchomiony", body)
+
+    # Ręczny test wysyłki maila (przycisk w zakładce Actions -> Run workflow)
+    if os.environ.get("SEND_TEST_EMAIL", "").lower() == "true":
+        print("\nTryb testowy: wysyłam maila próbnego...")
+        send_email(
+            "🧪 Test powiadomień - Motocyklowy Kolektor",
+            "<html><body style='font-family:Arial,sans-serif;'><h2>🧪 Test udany</h2>"
+            "<p>Jeśli widzisz tego maila, powiadomienia działają poprawnie.</p></body></html>",
+        )
 
     finalize_db()
     print("\nGotowe.")
