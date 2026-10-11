@@ -1,1 +1,42 @@
+name: Automatyczne sprawdzanie ofert
 
+on:
+  schedule:
+    - cron: "0 * * * *"   # co godzinę
+  workflow_dispatch:       # pozwala uruchomić ręcznie z zakładki Actions
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrape-offers
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalacja bibliotek
+        run: pip install requests beautifulsoup4
+
+      - name: Sprawdzenie ofert i wysyłka powiadomień
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: python "Nowy folder/background_job.py"
+
+      - name: Zapis zaktualizowanej bazy do repozytorium
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f otomoto.db
+          git diff --cached --quiet || git commit -m "Aktualizacja bazy ofert"
+          git push
