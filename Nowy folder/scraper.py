@@ -7,10 +7,17 @@ import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, parse_qsl
+from pathlib import Path
+
+
+# Baza leży w głównym katalogu repozytorium (jeden folder wyżej niż "Nowy folder"),
+# niezależnie od tego, skąd uruchamiany jest skrypt - dzięki temu apka Streamlit
+# i automat w GitHub Actions korzystają z tego samego pliku.
+DB_PATH = Path(__file__).resolve().parent.parent / "otomoto.db"
 
 
 def get_connection():
-    conn = sqlite3.connect('otomoto.db', timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30, check_same_thread=False)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError:
@@ -30,6 +37,8 @@ def ensure_extra_columns(cursor):
         cursor.execute("ALTER TABLE offers ADD COLUMN engine_capacity INTEGER")
     if 'accident_free' not in existing_cols:
         cursor.execute("ALTER TABLE offers ADD COLUMN accident_free TEXT")
+    if 'notified_at' not in existing_cols:
+        cursor.execute("ALTER TABLE offers ADD COLUMN notified_at TEXT")
 
 
 def init_db():
@@ -51,6 +60,7 @@ def init_db():
             country_origin TEXT,
             engine_capacity INTEGER,
             accident_free TEXT,
+            notified_at TEXT,
             first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -371,7 +381,7 @@ def scrape_and_update(category, brand, model, year_from, year_to, custom_url="",
 
     total_processed = new_inserts + updates
     return (
-        f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} ofert. "
+        f"Pomyślnie zgrano {total_processed} prawidłowych ofert. W bazie znajduje się teraz: {active_in_db} aut. "
         f"[DIAGNOSTYKA: znalezionych artykułów={diag_total_articles}, "
         f"niezgodnych z modelem={diag_rejected_model_mismatch}, "
         f"odrzuconych przez cenę={diag_rejected_price}, odrzuconych przez rocznik={diag_rejected_year}]"
