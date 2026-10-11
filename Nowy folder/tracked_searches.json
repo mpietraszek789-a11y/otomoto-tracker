@@ -1,1 +1,12 @@
-
+[
+  {
+    "category": "Osobowe",
+    "brand": "Mercedes-Benz",
+    "model": "CLA",
+    "year_from": 2022,
+    "year_to": 2022,
+    "engine_capacity_from": null,
+    "engine_capacity_to": null,
+    "accident_filter": "Dowolny"
+  }
+]
