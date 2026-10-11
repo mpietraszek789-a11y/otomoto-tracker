@@ -44,5 +44,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f otomoto.db
-          git diff --cached --quiet || git commit -m "Aktualizacja bazy ofert"
-          git push
+          git diff --cached --quiet && exit 0
+          git commit -m "Aktualizacja bazy ofert"
+          # Jeśli w międzyczasie ktoś zmienił repozytorium, pobieramy zmiany i próbujemy ponownie.
+          # Przy konflikcie w bazie wygrywa wersja z tego przebiegu (-X theirs w rebase = nasz commit).
+          for i in 1 2 3 4 5; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            echo "Próba $i nieudana, ponawiam za 5 s..."
+            sleep 5
+          done
+          exit 1
